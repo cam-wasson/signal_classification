@@ -1,3 +1,4 @@
 /.idea
 *.pyc
 /kalman_filter_bank/__pycache__
+kalman_filter_bank/__pycache__/filter_bank.cpython-39.pyc
