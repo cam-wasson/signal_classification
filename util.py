@@ -1,4 +1,6 @@
+import pandas as pd
 import numpy as np
+import sqlite3
 
 
 def pad_signal(sig, L=512):
@@ -158,17 +160,29 @@ def extract_low_pass_components_cdf_thresh(signal, dt, cdf_thresh=.95):
     }
 
 
-def compute_omegas(in_signal, pad=True, max_freq=10):
-    # pad the signal
-    if pad:
-        in_signal, true_bounds = pad_signal(in_signal)
-
-    dt = 1 / len(in_signal)
-    sig_dict = extract_low_pass_components(in_signal, 1 / dt, max_freq=max_freq)
-
-
 def compute_cdf(values, bins=1000):
     heights, edges = np.histogram(values, bins=bins)
     cdf_f, cdf_x = np.cumsum(heights) / sum(heights), edges[:-1]
     return cdf_x.flatten(), cdf_f.flatten()
+
+
+def connect(db_name):
+    path = f'./data/{db_name}.db'
+    return sqlite3.connect(path)
+
+
+def fetch_price_space(conn, et_start, et_stop, table_name='bars'):
+    c = conn.cursor()
+
+    # construct and execute query
+    args = {'et_start': et_start, 'et_stop': et_stop}
+    c.execute(f'''SELECT DISTINCT Date, EpochTime, Open, High, Low, Close, Volume FROM {table_name} 
+                  WHERE EpochTime >= :et_start AND EpochTime < :et_stop and Volume != 0
+                  ORDER BY EpochTime ASC''', args)
+    price_space_arr = np.array(c.fetchall())
+
+    # create and return DF
+    cols = ['Date', 'EpochTime', 'Open', 'High', 'Low', 'Close', 'Volume']
+    df = pd.DataFrame(price_space_arr, columns=cols)
+    return df
 

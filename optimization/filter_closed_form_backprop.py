@@ -386,13 +386,13 @@ if __name__ == "__main__":
     trained_filter_bank = train_filter_bank_adam(filter_bank=fbank,
                                                  data=fft_dict,
                                                  objective_name='pos_mse',
-                                                 n_epochs=30,
+                                                 n_epochs=28,
                                                  alpha=1e-1,
                                                  reset_cov=False)
 
     # reset the base filter
     for i, f in enumerate(trained_filter_bank.filters):
-        trained_filter_bank[i].x = np.zeros_like(trained_filter_bank[i].x)
+        f.x = np.zeros_like(f.x)
 
     # run and plot the trained filter
     trained_filter_dict = run_filter_bank(trained_filter_bank, fft_dict['raw'])
