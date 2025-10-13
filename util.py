@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import sqlite3
 
+from dataclasses import dataclass
+
 
 def pad_signal(sig, L=512):
     # determine sizes of the pads
@@ -166,23 +168,46 @@ def compute_cdf(values, bins=1000):
     return cdf_x.flatten(), cdf_f.flatten()
 
 
-def connect(db_name):
-    path = f'./data/{db_name}.db'
-    return sqlite3.connect(path)
+'''Database Functions'''
 
 
-def fetch_price_space(conn, et_start, et_stop, table_name='bars'):
+@dataclass
+class selector:
+    start_time = 0
+    stop_time = None
+    length = 14400
+    table_name = 'bars'
+
+
+def connect(db_name, db_root=f'./data'):
+    return sqlite3.connect(f'{db_root}/{db_name}.db')
+
+
+def fetch_price_space(conn, selection):
     c = conn.cursor()
 
     # construct and execute query
-    args = {'et_start': et_start, 'et_stop': et_stop}
-    c.execute(f'''SELECT DISTINCT Date, EpochTime, Open, High, Low, Close, Volume FROM {table_name} 
-                  WHERE EpochTime >= :et_start AND EpochTime < :et_stop and Volume != 0
-                  ORDER BY EpochTime ASC''', args)
+    if selection.stop_time is not None:
+        # use start and stop times
+        args = {'et_start': selection.start_time,
+                'et_stop': selection.stop_time}
+        c.execute(f'''SELECT DISTINCT Date, EpochTime, Open, High, Low, Close, Volume FROM {selection.table_name} 
+                      WHERE EpochTime >= :et_start AND EpochTime < :et_stop and Volume != 0
+                      ORDER BY EpochTime ASC''', args)
+    else:
+        # use start time and length
+        args = {'et_start': selection.start_time,
+                'lim': selection.length}
+        c.execute(f'''SELECT DISTINCT Date, EpochTime, Open, High, Low, Close, Volume FROM {selection.table_name} 
+                      WHERE EpochTime >= :et_start AND Volume > 0
+                      ORDER BY EpochTime ASC LIMIT :lim''', args)
     price_space_arr = np.array(c.fetchall())
 
     # create and return DF
     cols = ['Date', 'EpochTime', 'Open', 'High', 'Low', 'Close', 'Volume']
     df = pd.DataFrame(price_space_arr, columns=cols)
+    for c in cols[1:]:
+        df[c] = df[c].astype("float64")
     return df
+
 

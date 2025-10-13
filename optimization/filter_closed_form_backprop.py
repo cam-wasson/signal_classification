@@ -24,6 +24,8 @@ gradients when available.
 
 from __future__ import annotations
 
+import datetime
+
 from matplotlib import use as muse
 import matplotlib.pyplot as plt
 
@@ -345,11 +347,23 @@ if __name__ == "__main__":
     import pandas as pd
     sys.path.append('..')
     import util
+
+    # get training data
+    conn = util.connect('btc', db_root='../data')
+    train_selection = util.selector()
+    train_selection.start_time = datetime.datetime(2025, 8, 1).timestamp()
+    train_selection.stop_time = datetime.datetime(2025, 8, 15).timestamp() - 1
+    train_price_df = util.fetch_price_space(conn=conn, selection=train_selection)
+
+    test_selection = util.selector()
+    test_selection.start_time = datetime.datetime(2025, 8, 15).timestamp()
+    test_selection.stop_time = datetime.datetime(2025, 8, 16).timestamp() - 1
+    test_price_df = util.fetch_price_space(conn=conn, selection=test_selection)
+
     # read in measurement data
-    path = 'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\4_Fall\\CS-591\\Notebook\\btc_1m.csv'
-    df = pd.read_csv(path)
-    z = (df.Open.values - df.Open.values[0]) / df.Open.values[0]
-    dt = len(df.Date.unique()) / len(df)
+    z_train, z_test = ((train_price_df.Open.values - train_price_df.Open.values[0]) / train_price_df.Open.values[0],
+                       (test_price_df.Open.values - train_price_df.Open.values[0]) / test_price_df.Open.values[0])
+    dt = len(train_price_df.Date.unique()) / len(train_price_df)
 
     # Define the frequencies for sinusoidal components
     omegas = np.array([0.02, 0.66, 2.04, 3.9])
