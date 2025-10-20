@@ -5,21 +5,34 @@ from filterpy.kalman import KalmanFilter
 class SinusoidalKalmanFilter(KalmanFilter):
     def __init__(self, dim_x=2, dim_z=1, omega=np.pi/4, dt=0.0, sigma_xi=0.1, rho=1e-2):
         super().__init__(dim_x=dim_x, dim_z=dim_z)
+        # set state and dynamics info
         self.x = np.zeros(dim_x)
-        self.F = sinusoidal_f_matrix(omega, dt)
-        self.Q = sinusoidal_q_matrix(omega, dt, sigma_xi)
-        self.H = h_matrix(dim_x, dim_z)
-        self.R = r_matrix(dim_z, rho)
-        self.P = np.eye(dim_x) * 1e5
-
+        self.dim_z = dim_z
         self.dt = dt
         self.omega = omega
+        self.sigma_xi = sigma_xi
+        self.rho = rho
+
+        # set filter transition matrices
+        self.F = sinusoidal_f_matrix(omega, dt)
+        self.P = np.eye(dim_x) * 1e5
+        self.H = h_matrix(dim_x, dim_z)
+        self.set_r(rho)
+        self.set_q(sigma_xi)
 
     def amplitude(self):
         return np.sqrt(self.x[0]**2 + (self.x[1]/self.omega)**2)
 
     def phase(self):
         return np.arctan2(self.x[0], self.x[1]/self.omega)
+
+    def set_q(self, sigma_xi):
+        self.Q = sinusoidal_q_matrix(self.omega, self.dt, sigma_xi)
+        self.sigma_xi = sigma_xi
+
+    def set_r(self, rho):
+        self.R = r_matrix(self.dim_z, rho)
+        self.rho = rho
 
 
 def r_matrix(meas_shape, rho):

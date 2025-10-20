@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
@@ -10,9 +11,14 @@ def inverse_transform_theta(theta, scale=10):
     return theta/scale
 
 
+@dataclass
+class PositionErrorContext:
+    filter_state: np.array
+    truth_position: np.array
+
+
 def position_error(
-        training_data: dict,
-        filter_dict: dict,
+        context: PositionErrorContext
 ) -> float:
     """Compute the mean squared error (MSE) between estimates and truth.
 
@@ -22,22 +28,20 @@ def position_error(
 
     Parameters
     ----------
-    training_data : np.array
-        Dictionary containing the ground truth position that the filter should be estimating.
-    filter_dict : ndarray
-        The filter's estimation of the position/velocity measurements
+    context: position_error_context
+        Data class containing the necessary metadata to compute the loss function
     Returns
     -------
     float
         Loss accounting for filter's estimation of true position and overall smoothness
     """
-    scaler = StandardScaler()
 
     # extract values from input dictionaries
-    filter_state = filter_dict['x']
-    truth_position = training_data['truth']
+    filter_state = context.filter_state
+    truth_position = context.truth_position
 
     # scale
+    scaler = StandardScaler()
     scaled_truth = scaler.fit_transform(truth_position.reshape(-1, 1))
     scaled_filter = scaler.transform(filter_state[:, 0].reshape(-1, 1))
 
@@ -46,16 +50,23 @@ def position_error(
     mse = np.mean(np.square(np.abs(scaled_truth - scaled_filter)))
 
     # compute smoothness of the filter estimates
-    sigma_vel = np.std(np.diff(scaled_filter[:, 0]))
+    sigma_vel = np.std(np.diff(scaled_filter))
 
     # compute metrics
     smooth_loss = mse + sigma_vel
     return smooth_loss
 
 
+@dataclass
+class VelocityErrorContext:
+    filter_state: np.array
+    truth_position: np.array
+    truth_velocity: None
+    dt: float
+
+
 def velocity_error(
-        training_data: dict,
-        filter_dict: dict,
+        context: VelocityErrorContext
 ) -> float:
     """Compute the mean squared error (MSE) between estimates and truth.
 
@@ -65,10 +76,8 @@ def velocity_error(
 
     Parameters
     ----------
-    training_data : dict
-        Dictionary containing the ground truth position that the filter should be estimating.
-    filter_dict : ndarray
-        The filter's estimation of the position/velocity measurements
+    context: velocity_error_context
+        Data class containing the necessary metadata to compute the loss function
     Returns
     -------
     float
@@ -76,9 +85,9 @@ def velocity_error(
     """
 
     # extract values from input dictionaries
-    filter_state = filter_dict['x']
-    truth_position = training_data['truth']
-    dt = training_data['dt']
+    filter_state = context.filter_state
+    truth_position = context.truth_position
+    dt = context.dt
 
     # compute true velocity
     truth_velocity = np.gradient(truth_position) / dt
@@ -87,9 +96,68 @@ def velocity_error(
     mse = np.mean(np.square(np.abs(truth_velocity - filter_state[:, 1])))
 
     # compute smoothness of the filter estimates
-    acc = np.diff(filter_state[:, 1]) / dt
-    tv_acc = np.mean(np.abs(np.diff(acc)))  # total variation of velocity
+    tv = np.std(np.diff(filter_state[:, 1]) / dt)
 
     # compute metrics
-    smooth_loss = mse + tv_acc
+    smooth_loss = mse + tv
     return smooth_loss
+
+
+@dataclass
+class SpreadMaxContext:
+    measurement: np.array
+    filter_state: np.array
+    cluster_dictionary: dict
+
+
+def spread_max(context: SpreadMaxContext):
+
+    # extract data
+    filter_state = context.filter_state
+    measurements = context.measurement
+    cluster_dict = context.cluster_dictionary
+
+    # scale the data
+    scaler = StandardScaler()
+    scaled_truth = scaler.fit_transform(measurements.reshape(-1, 1))
+    scaled_filter = scaler.transform(filter_state[:, 0].reshape(-1, 1))
+
+    # compute spread
+    spread = scaled_truth - scaled_filter
+
+    # compute the total values of the spread for each cluster type
+    cluster_max_sum = np.sum(spread[np.concatenate(cluster_dict['cluster_max']['x_points'])])
+    cluster_min_sum = np.sum(spread[np.concatenate(cluster_dict['cluster_min']['x_points'])])
+
+    # compute the total spread distance
+    total_spread = cluster_max_sum - cluster_min_sum
+
+    # convert to loss -- as total spread increases, the loss decreases
+    return 1 / total_spread
+
+
+class PhaseAlignmentContext:
+    filter_state = np.array
+    truth_position = np.array
+    max_frequency = float
+    cdf_thresh = None
+    dt = float
+
+
+def phase_alignment(context: PhaseAlignmentContext):
+    # run FFT on the raw data
+    fhat_truth = np.fft.fft(context.truth_position)
+    fft_freq = np.fft.fftfreq(fhat_truth)
+    keep_idx = np.abs(fft_freq) <= context.max_frequency
+
+    # run FFT on the kf
+    fhat_kf = np.fft.fft(context.filter_state[:, 0])
+
+    # perform cosine similarity of FFT spectra
+    dot = np.sum(fhat_truth[keep_idx] * fhat_kf[keep_idx], axis=1)  # element-wise dot product on rows
+    mag1 = np.linalg.norm(fhat_truth[keep_idx])
+    mag2 = np.linalg.norm(fhat_kf[keep_idx])
+    cosine_sim = dot / (mag1 * mag2)
+
+    # promote cosine sims close to 1, -1; punish cosine sim ~0
+    return 1 / (np.abs(cosine_sim) - 10**-8)

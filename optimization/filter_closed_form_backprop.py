@@ -36,163 +36,77 @@ from tqdm import tqdm
 import sys
 sys.path.append('../kalman_filter_bank')
 from filter_bank import SinusoidalFilterBank, run_filter_bank
-from kalman_filter import sinusoidal_q_matrix, r_matrix
+from Labelling.ExtremaCluster import compute_cluster_dict
 
 muse('Qt5Agg')
 
 OBJECTIVES = {
     'pos_mse': {
         'fn': opt_util.position_error,
-        'required_keys': ['training_data', 'filter_dict'],
+        'required_keys': ['context'],
     },
     'vel_mse': {
         'fn': opt_util.velocity_error,
-        'required_keys': ['training_data', 'filter_dict'],
+        'required_keys': ['context'],
     },
+    'spread_max': {
+        'fn': opt_util.spread_max,
+        'required_keys': ['context'],
+    }
     # add more objectives here
 }
 
 
-def compute_grad_q():
-    pass
+def build_objective_context(pre_context, filter_values, obj_name):
+    # build the appropriate data class for the objective function
+    if obj_name == 'pos_mse':
+        ctx = pos_mse_context(pre_context, filter_values)
+    elif obj_name == 'vel_mse':
+        ctx = vel_mse_context(pre_context, filter_values)
+    elif obj_name == 'spread_max':
+        ctx = spread_max_context(pre_context, filter_values)
+    elif obj_name == 'phase_alignment':
+        ctx = phase_align_context(pre_context, filter_values)
+    else:
+        ctx = None
+
+    return ctx
 
 
-def train_filter_bank(
-    filter_bank: SinusoidalFilterBank,
-    data: dict,
-    objective_name: str,
-    n_epochs: int = 10,
-    lr: float = 1e0,
-    decay: float = .9,
-    epsilon: float = 1e-4,
-    verbose: bool = True,
-) -> SinusoidalFilterBank:
-    """Optimise Q and R using a finite‑difference gradient descent.
+def pos_mse_context(pre_context, filter_values):
+    # instantiate the context data class
+    pos_mse_ctx = opt_util.PositionErrorContext
+    # populate with values
+    pos_mse_ctx.filter_state = filter_values
+    pos_mse_ctx.truth_position = pre_context['truth']
+    return pos_mse_ctx
 
-    In lieu of closed‑form derivatives, this function approximates the
-    gradient of the MSE loss with respect to the diagonal entries of
-    ``Q`` and the scalar ``R`` for each filter.  At each epoch, each
-    parameter is perturbed by ``epsilon`` in positive and negative
-    directions, the loss is recomputed, and the gradient is estimated
-    via the central difference.  The parameters are then updated with
-    a simple gradient‑descent step and clipped to remain positive.
 
-    Parameters
-    ----------
-    filter_bank : SinusoidalFilterBank
-        The bank of filters to optimise.
-    data : dict
-        Training data dictionary. It must include:
-            - 'measurements': ndarray containing the measurement sequence
-            - 'pos_truth': ndarray of true positions for computing the loss
-            - 'dt': float representing the time step between consecutive measurements
-    objective_name : str
-        Name of the objective function to use from the objective registry.
-    n_epochs : int, optional
-        Number of optimisation epochs.
-    lr : float, optional
-        Learning rate for gradient descent.
-    decay: float, optional
-        Decay factor for the learning rate so that the innovation jumps decrease
-    epsilon : float, optional
-        Perturbation size for finite difference estimation.
-    verbose : bool, optional
-        Whether to print progress information.
-    """
-    # fetch the chosen objective definition
-    obj_entry = OBJECTIVES[objective_name]
-    loss_fn = obj_entry['fn']
+def vel_mse_context(pre_context, filter_values):
+    # instantiate the context data class
+    vel_mse_ctx = opt_util.VelocityErrorContext
+    # populate with values
+    vel_mse_ctx.truth_position = pre_context['truth']
+    vel_mse_ctx.filter_state = filter_values
+    vel_mse_ctx.dt = pre_context['dt']
+    return vel_mse_ctx
 
-    n_filters = len(filter_bank.filters)
 
-    # Extract current Q scalar and R scalar parameters
-    q_linear = filter_bank.sigma_xi.copy()
-    r_linear = filter_bank.rho.copy()
-    q_log = np.log10(q_linear)
-    r_log = np.log10(r_linear)
+def spread_max_context(pre_context, filter_values):
+    # instantiate the context data class
+    spread_max_ctx = opt_util.SpreadMaxContext
+    # populate with values
+    spread_max_ctx.measurement = pre_context['raw']
+    spread_max_ctx.filter_state = filter_values
+    spread_max_ctx.cluster_dictionary = pre_context['cluster_dict']
+    return spread_max_ctx
 
-    plt.plot(data['raw'])
 
-    for epoch in range(n_epochs):
-
-        # Compute current loss
-        filter_dict = run_filter_bank(filter_bank, data['raw'], verbose)
-        loss = loss_fn(data, filter_dict)
-
-        print(f"Epoch {epoch + 1}/{n_epochs}, Loss: {loss:.6f}")
-        plt.plot(filter_dict['x'][:, 0], label=f'Epoch: {epoch}')
-
-        # Initialize gradient arrays
-        grad_q = np.zeros_like(q_linear)
-        grad_r = np.zeros_like(r_linear)
-
-        # Estimate gradient for each filter and each parameter
-        for i in tqdm(range(n_filters)):
-            # fetch this filter's omega term
-            this_omega = filter_bank.filters[i].omega
-
-            # adjust Q
-            orig_value = q_log[i]
-
-            # Perturb positively
-            q_linear[i] = 10**(orig_value + epsilon)
-            filter_bank.filters[i].Q = sinusoidal_q_matrix(this_omega, dt, q_linear[i])
-            filter_dict_plus = run_filter_bank(filter_bank, data['raw'], verbose)
-            loss_plus = loss_fn(data, filter_dict_plus)
-
-            # Perturb negatively
-            q_linear[i] = 10**(orig_value - epsilon)
-            filter_bank.filters[i].Q = sinusoidal_q_matrix(this_omega, dt, q_linear[i])
-            filter_dict_minus = run_filter_bank(filter_bank, data['raw'], verbose)
-            loss_minus = loss_fn(data, filter_dict_minus)
-
-            # Restore original parameter
-            q_linear[i] = 10**orig_value
-            filter_bank.filters[i].Q = sinusoidal_q_matrix(this_omega, dt, q_linear[i])
-
-            # Central finite difference
-            grad_q[i] = (loss_plus - loss_minus) / (2.0 * epsilon)
-
-            # R scalar
-            orig_r = r_log[i]
-
-            # Perturb log space positively
-            r_linear[i] = 10**(orig_r + epsilon)
-            filter_bank.filters[i].R = r_linear[i]*np.eye(filter_bank.dim_z)
-            filter_dict_plus = run_filter_bank(filter_bank, data['raw'], verbose)
-            loss_plus = loss_fn(data, filter_dict_plus)
-
-            # Perturb log space negatively, convert to linear, compute loss
-            r_linear[i] = 10**(orig_r - epsilon)
-            filter_bank.filters[i].R = r_linear[i]*np.eye(filter_bank.dim_z)
-            filter_dict_minus = run_filter_bank(filter_bank, data['raw'], verbose)
-            loss_minus = loss_fn(data, filter_dict_minus)
-
-            # Restore original linear value of rho
-            r_linear[i] = 10**orig_r
-            filter_bank.filters[i].R = r_linear[i]*np.eye(filter_bank.dim_z)
-            grad_r[i] = (loss_plus - loss_minus) / (2.0 * epsilon)
-
-        # Update parameters
-        q_log -= lr * grad_q
-        r_log -= lr * grad_r
-        lr = lr*decay
-
-        # clipping in case of NaNs
-        q_log[np.isnan(q_log)] = -8.0
-        r_log[np.isnan(r_log)] = -8.0
-
-        # Update the filter bank matrices
-        for i, f in enumerate(filter_bank.filters):
-            f.Q = sinusoidal_q_matrix(f.omega, dt, 10**q_log[i])
-            f.R = 10**r_log[i]*np.eye(f.dim_z)
-
-    # Final loss reporting
-    filter_dict = run_filter_bank(filter_bank, data['meas'], verbose)
-    loss = loss_fn(data, filter_dict)
-    print(f"Final Loss after {n_epochs} epochs: {loss:.6f}")
-        
-    return filter_bank
+def phase_align_context(pre_context, filter_values):
+    # instantiate the context data class
+    phase_align_ctx = opt_util.PhaseAlignmentContext
+    # populate with values
+    return phase_align_ctx
 
 
 def train_filter_bank_adam(filter_bank,
@@ -226,10 +140,13 @@ def train_filter_bank_adam(filter_bank,
 
         # Compute current loss
         filter_dict = run_filter_bank(filter_bank, data['raw'], verbose=False)
-        loss = loss_fn(data, filter_dict)
+        obj_ctx = build_objective_context(data, filter_dict['x'], objective_name)
+        loss = loss_fn(obj_ctx)
         losses[epoch] = loss
 
         print(f"Epoch {epoch + 1}/{n_epochs}, Loss: {loss:.6f}")
+        print(f'\tQ Scalars: {q_log}')
+        print(f'\tR Scalars: {r_log}')
         # plot_filter_bank(data['raw'], filter_dict, data['dt'])
 
         # Initialize gradient arrays
@@ -238,29 +155,32 @@ def train_filter_bank_adam(filter_bank,
 
         # Estimate gradient for each filter and each parameter
         for i in tqdm(range(n_filters)):
-            # fetch this filter's omega term
-            this_omega = filter_bank.filters[i].omega
-
             # adjust Q
             orig_value = q_log[i]
 
-            # Perturb positively
+            # Perturb positively, run filter bank
             q_linear[i] = 10**(orig_value + autograd_epsilon)
-            filter_bank.filters[i].Q = sinusoidal_q_matrix(this_omega, dt, q_linear[i])
+            filter_bank.filters[i].set_q(q_linear[i])
             filter_dict_plus = run_filter_bank(filter_bank, data['raw'], verbose=False)
-            loss_plus = loss_fn(data, filter_dict_plus)
+
+            # compute loss for positive perturbation
+            obj_ctx = build_objective_context(data, filter_dict_plus['x'], objective_name)
+            loss_plus = loss_fn(obj_ctx)
 
             # Perturb negatively
             q_linear[i] = 10**(orig_value - autograd_epsilon)
-            filter_bank.filters[i].Q = sinusoidal_q_matrix(this_omega, dt, q_linear[i])
+            filter_bank.filters[i].set_q(q_linear[i])
             filter_dict_minus = run_filter_bank(filter_bank, data['raw'], verbose=False)
-            loss_minus = loss_fn(data, filter_dict_minus)
+
+            # compute loss for negative perturbation
+            obj_ctx = build_objective_context(data, filter_dict_minus['x'], objective_name)
+            loss_minus = loss_fn(obj_ctx)
 
             # Restore original parameter
             q_linear[i] = 10**orig_value
-            filter_bank.filters[i].Q = sinusoidal_q_matrix(this_omega, dt, q_linear[i])
+            filter_bank.filters[i].set_q(q_linear[i])
 
-            # Central finite difference
+            # Central finite difference for the Q matrices
             grad_q[i] = (loss_plus - loss_minus) / (2.0 * autograd_epsilon)
 
             # R scalar
@@ -268,19 +188,25 @@ def train_filter_bank_adam(filter_bank,
 
             # Perturb log space positively
             r_linear[i] = 10**(orig_r + autograd_epsilon)
-            filter_bank.filters[i].R = r_linear[i]*np.eye(filter_bank.dim_z)
+            filter_bank.filters[i].set_r(r_linear[i])
             filter_dict_plus = run_filter_bank(filter_bank, data['raw'], verbose=False)
-            loss_plus = loss_fn(data, filter_dict_plus)
+
+            # compute loss for positive perturbation
+            obj_ctx = build_objective_context(data, filter_dict_plus['x'], objective_name)
+            loss_plus = loss_fn(obj_ctx)
 
             # Perturb log space negatively, convert to linear, compute loss
             r_linear[i] = 10**(orig_r - autograd_epsilon)
-            filter_bank.filters[i].R = r_linear[i]*np.eye(filter_bank.dim_z)
+            filter_bank.filters[i].set_r(r_linear[i])
             filter_dict_minus = run_filter_bank(filter_bank, data['raw'], verbose=False)
-            loss_minus = loss_fn(data, filter_dict_minus)
+
+            # compute loss for negative perturbation
+            obj_ctx = build_objective_context(data, filter_dict_minus['x'], objective_name)
+            loss_minus = loss_fn(obj_ctx)
 
             # Restore original linear value of rho
             r_linear[i] = 10**orig_r
-            filter_bank.filters[i].R = r_linear[i]*np.eye(filter_bank.dim_z)
+            filter_bank.filters[i].set_r(r_linear[i])
             grad_r[i] = (loss_plus - loss_minus) / (2.0 * autograd_epsilon)
 
         # Update biased moments for Q exponents
@@ -301,8 +227,8 @@ def train_filter_bank_adam(filter_bank,
 
         # Update the filter bank matrices; reset state
         for i, f in enumerate(filter_bank.filters):
-            f.Q = sinusoidal_q_matrix(f.omega, dt, 10**q_log[i])
-            f.R = 10**r_log[i]*np.eye(f.dim_z)
+            f.set_q(10**q_log[i])
+            f.set_r(10**r_log[i])
             f.x = np.zeros_like(f.x)
             if reset_cov:
                 f.P *= 1e5
@@ -351,13 +277,14 @@ if __name__ == "__main__":
     # get training data
     conn = util.connect('btc', db_root='../data')
     train_selection = util.selector()
-    train_selection.start_time = datetime.datetime(2025, 8, 1).timestamp()
-    train_selection.stop_time = datetime.datetime(2025, 8, 15).timestamp() - 1
+    train_selection.start_time = datetime.datetime(2025, 7, 31).timestamp()
+    train_selection.stop_time = datetime.datetime(2025, 8, 10).timestamp() - 1
     train_price_df = util.fetch_price_space(conn=conn, selection=train_selection)
 
+    # get test data
     test_selection = util.selector()
-    test_selection.start_time = datetime.datetime(2025, 8, 15).timestamp()
-    test_selection.stop_time = datetime.datetime(2025, 8, 16).timestamp() - 1
+    test_selection.start_time = datetime.datetime(2025, 8, 11).timestamp()
+    test_selection.stop_time = datetime.datetime(2025, 8, 12).timestamp() - 1
     test_price_df = util.fetch_price_space(conn=conn, selection=test_selection)
 
     # read in measurement data
@@ -369,10 +296,11 @@ if __name__ == "__main__":
     omegas = np.array([0.02, 0.66, 2.04, 3.9])
 
     # produce truth data
-    pad_len = util.compute_pad_length(z)
-    z_pad, pad_bounds = util.pad_signal(z, L=pad_len)
+    pad_len = util.compute_pad_length(z_train)
+    z_pad, pad_bounds = util.pad_signal(z_train, L=pad_len)
     fft_dict = util.extract_low_pass_components(z_pad, dt, max_freq=2.0)  # np.ceil(max(omegas))
-    fft_dict['raw'] = z
+    fft_dict['raw'] = z_train
+    fft_dict['raw_test'] = z_test
     fft_dict['truth'] = fft_dict['truth'][pad_bounds[0]:pad_bounds[1]]
 
     # Construct the filter bank
@@ -387,21 +315,12 @@ if __name__ == "__main__":
     # filter_out = run_filter_bank(fbank, fft_dict['raw'][:200], verbose=False)
     # fbank.P = filter_out['p'][-1]
 
-    # Train the filter bank using the Option 1 optimisation (finite differences)
-    # trained_filter_bank = train_filter_bank(
-    #                             filter_bank=fbank,
-    #                             data=fft_dict,
-    #                             objective_name='pos_mse',
-    #                             n_epochs=10,
-    #                             lr=1e-1,
-    #                             epsilon=1e-4,
-    #                             verbose=False,
-    #                         )
+    # Train the filter bank
     trained_filter_bank = train_filter_bank_adam(filter_bank=fbank,
                                                  data=fft_dict,
                                                  objective_name='pos_mse',
-                                                 n_epochs=28,
-                                                 alpha=1e-1,
+                                                 n_epochs=10,
+                                                 alpha=25e-2,  # 1e-1,
                                                  reset_cov=False)
 
     # reset the base filter
