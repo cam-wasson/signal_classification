@@ -57,6 +57,116 @@ OBJECTIVES = {
 }
 
 
+def pos_mse_precontext(selections, max_freq_fft=2.0) -> dict:
+
+    conn = util.connect('btc', db_root='../data')
+    # get training data
+    train_price_df = util.fetch_price_space(conn=conn, selection=selections)  # ['train'])
+
+    # get test data
+    # test_price_df = util.fetch_price_space(conn=conn, selection=test_selection)
+
+    # read in measurement data
+    z_train, z_test = ((train_price_df.Open.values - train_price_df.Open.values[0]) / train_price_df.Open.values[0], 0)
+                       # (test_price_df.Open.values - train_price_df.Open.values[0]) / test_price_df.Open.values[0])
+    dt = len(train_price_df.Date.unique()) / len(train_price_df)
+
+    # pad front/back of signal for stronger FFT estimation of signal edges
+    pad_len = util.compute_pad_length(z_train)
+    z_pad, pad_bounds = util.pad_signal(z_train, L=pad_len)
+
+    # produce truth data
+    fft_dict = util.extract_low_pass_components(z_pad, dt, max_freq=max_freq_fft)
+
+    # store everything important
+    fft_dict['raw'] = z_train
+    fft_dict['raw_test'] = z_test
+    fft_dict['truth'] = fft_dict['truth'][pad_bounds[0]:pad_bounds[1]]  # fft reconstruction w/o padded portions
+    fft_dict['dt'] = dt
+
+    return fft_dict
+
+
+def pos_mse_context(pre_context, filter_values):
+    # instantiate the context data class
+    pos_mse_ctx = opt_util.PositionErrorContext
+
+    # populate with values
+    pos_mse_ctx.filter_state = filter_values
+    pos_mse_ctx.truth_position = pre_context['truth']
+
+    return pos_mse_ctx
+
+
+def vel_mse_precontext(selections, max_freq_fft=2.0):
+    # re-use the same pre-context generation as the position
+    return pos_mse_precontext(selections, max_freq_fft)
+
+
+def vel_mse_context(pre_context, filter_values):
+    # instantiate the context data class
+    vel_mse_ctx = opt_util.VelocityErrorContext
+
+    # populate with values
+    vel_mse_ctx.truth_position = pre_context['truth']
+    vel_mse_ctx.filter_state = filter_values
+    vel_mse_ctx.dt = pre_context['dt']
+
+    return vel_mse_ctx
+
+
+def spread_max_precontext(selection, max_freq_fft=2.0, cluster_cdf_threshold=.9):
+    conn = util.connect('btc', db_root='../data')
+
+    # get training data
+    train_price_df = util.fetch_price_space(conn=conn, selection=selection)
+    dt = len(train_price_df.Date.unique()) / len(train_price_df)
+    z_train = (train_price_df.Open.values - train_price_df.Open.values[0]) / train_price_df.Open.values[0]
+    cluster_train = compute_cluster_dict(z_train, max_freq_fft, cluster_cdf_threshold, dt)
+
+    # assemble the precontext
+    pre_context = dict({'raw': z_train,
+                        'cluster_dict': cluster_train})
+    return pre_context
+
+
+def spread_max_context(pre_context, filter_values):
+    # instantiate the context data class
+    spread_max_ctx = opt_util.SpreadMaxContext
+
+    # populate with values
+    spread_max_ctx.measurement = pre_context['raw']
+    spread_max_ctx.filter_state = filter_values
+    spread_max_ctx.cluster_dictionary = pre_context['cluster_dict']
+
+    return spread_max_ctx
+
+
+def phase_align_context(pre_context, filter_values):
+    # instantiate the context data class
+    phase_align_ctx = opt_util.PhaseAlignmentContext
+
+    # populate with values
+    return phase_align_ctx
+
+
+def build_objective_precontext(selection, max_freq=2.0, obj_name='pos_mse', cluster_cdf=.9):
+    # build the appropriate data class for the objective function
+    if obj_name == 'pos_mse':
+        pre_ctx = pos_mse_precontext(selection, max_freq)
+    elif obj_name == 'vel_mse':
+        pre_ctx = vel_mse_precontext(selection, max_freq)
+    elif obj_name == 'spread_max':
+        pre_ctx = spread_max_precontext(selection, max_freq, cluster_cdf)
+    elif obj_name == 'phase_alignment':
+        # pre_ctx = phase_align_precontext(pre_context, filter_values)
+        pre_ctx = None
+    else:
+        pre_ctx = None
+
+    return pre_ctx
+
+
 def build_objective_context(pre_context, filter_values, obj_name):
     # build the appropriate data class for the objective function
     if obj_name == 'pos_mse':
@@ -71,42 +181,6 @@ def build_objective_context(pre_context, filter_values, obj_name):
         ctx = None
 
     return ctx
-
-
-def pos_mse_context(pre_context, filter_values):
-    # instantiate the context data class
-    pos_mse_ctx = opt_util.PositionErrorContext
-    # populate with values
-    pos_mse_ctx.filter_state = filter_values
-    pos_mse_ctx.truth_position = pre_context['truth']
-    return pos_mse_ctx
-
-
-def vel_mse_context(pre_context, filter_values):
-    # instantiate the context data class
-    vel_mse_ctx = opt_util.VelocityErrorContext
-    # populate with values
-    vel_mse_ctx.truth_position = pre_context['truth']
-    vel_mse_ctx.filter_state = filter_values
-    vel_mse_ctx.dt = pre_context['dt']
-    return vel_mse_ctx
-
-
-def spread_max_context(pre_context, filter_values):
-    # instantiate the context data class
-    spread_max_ctx = opt_util.SpreadMaxContext
-    # populate with values
-    spread_max_ctx.measurement = pre_context['raw']
-    spread_max_ctx.filter_state = filter_values
-    spread_max_ctx.cluster_dictionary = pre_context['cluster_dict']
-    return spread_max_ctx
-
-
-def phase_align_context(pre_context, filter_values):
-    # instantiate the context data class
-    phase_align_ctx = opt_util.PhaseAlignmentContext
-    # populate with values
-    return phase_align_ctx
 
 
 def train_filter_bank_adam(filter_bank,
@@ -274,39 +348,27 @@ if __name__ == "__main__":
     sys.path.append('..')
     import util
 
-    # get training data
-    conn = util.connect('btc', db_root='../data')
+    # build training selection
     train_selection = util.selector()
     train_selection.start_time = datetime.datetime(2025, 7, 31).timestamp()
     train_selection.stop_time = datetime.datetime(2025, 8, 10).timestamp() - 1
-    train_price_df = util.fetch_price_space(conn=conn, selection=train_selection)
 
-    # get test data
+    # build test selection
     test_selection = util.selector()
     test_selection.start_time = datetime.datetime(2025, 8, 11).timestamp()
     test_selection.stop_time = datetime.datetime(2025, 8, 12).timestamp() - 1
-    test_price_df = util.fetch_price_space(conn=conn, selection=test_selection)
 
-    # read in measurement data
-    z_train, z_test = ((train_price_df.Open.values - train_price_df.Open.values[0]) / train_price_df.Open.values[0],
-                       (test_price_df.Open.values - train_price_df.Open.values[0]) / test_price_df.Open.values[0])
-    dt = len(train_price_df.Date.unique()) / len(train_price_df)
+    # construct full precontext
+    # data_selection = {'train': train_selection,
+    #                   'test': test_selection}
+    objective = 'pos_mse'
+    pre_context = build_objective_precontext(selection=train_selection, obj_name=objective)
 
-    # Define the frequencies for sinusoidal components
+    # Construct the filter bank w/ the following sinusoidal frequencies
     omegas = np.array([0.02, 0.66, 2.04, 3.9])
-
-    # produce truth data
-    pad_len = util.compute_pad_length(z_train)
-    z_pad, pad_bounds = util.pad_signal(z_train, L=pad_len)
-    fft_dict = util.extract_low_pass_components(z_pad, dt, max_freq=2.0)  # np.ceil(max(omegas))
-    fft_dict['raw'] = z_train
-    fft_dict['raw_test'] = z_test
-    fft_dict['truth'] = fft_dict['truth'][pad_bounds[0]:pad_bounds[1]]
-
-    # Construct the filter bank
     fbank = SinusoidalFilterBank(
         omegas=omegas,
-        dt=dt,
+        dt=pre_context['dt'],
         sigma_xi=[1e1]*len(omegas),
         rho=[1e-1]*len(omegas),
     )
@@ -317,10 +379,10 @@ if __name__ == "__main__":
 
     # Train the filter bank
     trained_filter_bank = train_filter_bank_adam(filter_bank=fbank,
-                                                 data=fft_dict,
-                                                 objective_name='pos_mse',
+                                                 data=pre_context,
+                                                 objective_name=objective,
                                                  n_epochs=10,
-                                                 alpha=25e-2,  # 1e-1,
+                                                 alpha=1e-1,  # 2.5e-1,
                                                  reset_cov=False)
 
     # reset the base filter
@@ -328,8 +390,8 @@ if __name__ == "__main__":
         f.x = np.zeros_like(f.x)
 
     # run and plot the trained filter
-    trained_filter_dict = run_filter_bank(trained_filter_bank, fft_dict['raw'])
-    plot_filter_bank(fft_dict['raw'], trained_filter_dict, dt)
+    trained_filter_dict = run_filter_bank(trained_filter_bank, pre_context['raw'])
+    plot_filter_bank(pre_context['raw'], trained_filter_dict, pre_context['dt'])
 
     # Display the optimised noise parameters
     for idx, filt in enumerate(trained_filter_bank.filters):

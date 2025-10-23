@@ -42,11 +42,10 @@ def position_error(
 
     # scale
     scaler = StandardScaler()
-    scaled_truth = scaler.fit_transform(truth_position.reshape(-1, 1))
-    scaled_filter = scaler.transform(filter_state[:, 0].reshape(-1, 1))
+    scaled_truth = scaler.fit_transform(truth_position.reshape(-1, 1)).flatten()
+    scaled_filter = scaler.transform(filter_state[:, 0].reshape(-1, 1)).flatten()
 
     # compute overall accuracy
-    # mse = np.mean(np.square(np.abs(truth_position - filter_state[:, 0])))
     mse = np.mean(np.square(np.abs(scaled_truth - scaled_filter)))
 
     # compute smoothness of the filter estimates
@@ -86,17 +85,23 @@ def velocity_error(
 
     # extract values from input dictionaries
     filter_state = context.filter_state
-    truth_position = context.truth_position
-    dt = context.dt
+    if context.truth_velocity is None:
+        truth_position = context.truth_position
+        dt = context.dt
+        truth_velocity = np.gradient(truth_position) / dt
+    else:
+        truth_velocity = context.truth_velocity
 
-    # compute true velocity
-    truth_velocity = np.gradient(truth_position) / dt
+    # scale
+    scaler = StandardScaler()
+    scaled_truth = scaler.fit_transform(truth_velocity.reshape(-1, 1))
+    scaled_filter = scaler.transform(filter_state[:, 1].reshape(-1, 1))
 
     # compute overall accuracy
-    mse = np.mean(np.square(np.abs(truth_velocity - filter_state[:, 1])))
+    mse = np.mean(np.square(np.abs(scaled_truth - scaled_filter)))
 
     # compute smoothness of the filter estimates
-    tv = np.std(np.diff(filter_state[:, 1]) / dt)
+    tv = np.std(np.diff(filter_state[:, 1]))
 
     # compute metrics
     smooth_loss = mse + tv
