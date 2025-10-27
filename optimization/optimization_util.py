@@ -4,11 +4,11 @@ from sklearn.preprocessing import StandardScaler
 
 
 def transform_theta(theta, scale=10):
-    return theta*scale
+    return theta * scale
 
 
 def inverse_transform_theta(theta, scale=10):
-    return theta/scale
+    return theta / scale
 
 
 @dataclass
@@ -63,6 +63,12 @@ class VelocityErrorContext:
     truth_velocity: None
     dt: float
 
+    def __init__(self, filter_state=np.array([]), truth_position=np.array([]), truth_velocity=None, dt=0.0):
+        self.filter_state = filter_state
+        self.truth_position = truth_position
+        self.truth_velocity = truth_velocity
+        self.dt = dt
+
 
 def velocity_error(
         context: VelocityErrorContext
@@ -114,9 +120,13 @@ class SpreadMaxContext:
     filter_state: np.array
     cluster_dictionary: dict
 
+    def __init__(self, measurement=np.array([]), filter_state=np.array([]), cluster_dictionary=dict):
+        self.measurement = measurement
+        self.filter_state = filter_state
+        self.cluster_dictionary = cluster_dictionary
 
-def spread_max(context: SpreadMaxContext):
 
+def spread_max(context: SpreadMaxContext, penalty=1.2):
     # extract data
     filter_state = context.filter_state
     measurements = context.measurement
@@ -131,14 +141,18 @@ def spread_max(context: SpreadMaxContext):
     spread = scaled_truth - scaled_filter
 
     # compute the total values of the spread for each cluster type
-    cluster_max_sum = np.sum(spread[np.concatenate(cluster_dict['cluster_max']['x_points'])])
-    cluster_min_sum = np.sum(spread[np.concatenate(cluster_dict['cluster_min']['x_points'])])
+    max_cluster_values = spread[np.concatenate(cluster_dict['cluster_max']['x_points'])]
+    min_cluster_values = spread[np.concatenate(cluster_dict['cluster_min']['x_points'])]
+    bad_max_idx = max_cluster_values < 0
+    bad_min_idx = min_cluster_values > 0
 
     # compute the total spread distance
-    total_spread = cluster_max_sum - cluster_min_sum
+    good_score = sum(max_cluster_values[~bad_max_idx]) + sum(np.abs(min_cluster_values[~bad_min_idx]))
+    bad_score = penalty * (sum(np.abs(max_cluster_values[bad_max_idx])) +
+                           sum(np.abs(min_cluster_values[bad_min_idx])))
 
     # convert to loss -- as total spread increases, the loss decreases
-    return 1 / total_spread
+    return 1 / max((good_score - bad_score), 10**-8)
 
 
 class PhaseAlignmentContext:
@@ -165,4 +179,4 @@ def phase_alignment(context: PhaseAlignmentContext):
     cosine_sim = dot / (mag1 * mag2)
 
     # promote cosine sims close to 1, -1; punish cosine sim ~0
-    return 1 / (np.abs(cosine_sim) - 10**-8)
+    return 1 / (np.abs(cosine_sim) - 10 ** -8)

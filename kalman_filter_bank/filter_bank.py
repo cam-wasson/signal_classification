@@ -9,6 +9,7 @@ class FilterBank:
     def __init__(self, dim_x, dim_z):
         self.dim_x = dim_x
         self.dim_z = dim_z
+        self.x = np.zeros(dim_x)
         self.filters = []
         self.N = self.__len__()
 
@@ -31,6 +32,10 @@ class FilterBank:
         for f_idx in range(len(self.filters)):
             phase[f_idx] = self.filters[f_idx].phase()
         return phase
+
+    def reset_states(self):
+        for f in self.filters:
+            f.x = np.zeros_like(f.x)
 
     def __len__(self):
         return len(self.filters)
@@ -180,7 +185,7 @@ def run_filter_bank(fbank, measurements, verbose=True):
         all_amp[k] = fbank.amplitudes()
         all_phi[k] = fbank.phases()
 
-    return {'x': all_states, 'p': all_covs, 'w': all_weights, 'amp': all_amp, 'phi': all_phi}
+    return {'x': all_states, 'p': all_covs, 'w': all_weights, 'amp': all_amp, 'phi': all_phi, 'omega': fbank.omega}
 
 
 def create_sig_dict(price_df, random_date=True):

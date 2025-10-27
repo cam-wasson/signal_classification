@@ -57,34 +57,46 @@ OBJECTIVES = {
 }
 
 
-def pos_mse_precontext(selections, max_freq_fft=2.0) -> dict:
+def pos_mse_precontext(selections, max_freq_fft=2.0, spectrum_thresh=None) -> dict:
 
     conn = util.connect('btc', db_root='../data')
     # get training data
-    train_price_df = util.fetch_price_space(conn=conn, selection=selections)  # ['train'])
+    train_price_df = util.fetch_price_space(conn=conn, selection=selections['train'])
 
     # get test data
-    # test_price_df = util.fetch_price_space(conn=conn, selection=test_selection)
+    test_price_df = util.fetch_price_space(conn=conn, selection=selections['test'])
 
     # read in measurement data
-    z_train, z_test = ((train_price_df.Open.values - train_price_df.Open.values[0]) / train_price_df.Open.values[0], 0)
-                       # (test_price_df.Open.values - train_price_df.Open.values[0]) / test_price_df.Open.values[0])
-    dt = len(train_price_df.Date.unique()) / len(train_price_df)
+    z_train, z_test = ((train_price_df.Open.values - train_price_df.Open.values[0]) / train_price_df.Open.values[0],
+                       (test_price_df.Open.values - test_price_df.Open.values[0]) / test_price_df.Open.values[0])
+    dt = 1/(24*60)  # len(train_price_df.Date.unique()) / len(train_price_df)
 
     # pad front/back of signal for stronger FFT estimation of signal edges
     pad_len = util.compute_pad_length(z_train)
     z_pad, pad_bounds = util.pad_signal(z_train, L=pad_len)
 
-    # produce truth data
-    fft_dict = util.extract_low_pass_components(z_pad, dt, max_freq=max_freq_fft)
+    # produce truth training data
+    if spectrum_thresh is None:
+        fft_dict_train = util.extract_low_pass_components(z_pad, dt, max_freq=max_freq_fft)
+    else:
+        fft_dict_train = util.extract_low_pass_components_cdf_thresh(z_pad, dt, cdf_thresh=spectrum_thresh)
+    fft_dict_train['truth'] = fft_dict_train['truth'][pad_bounds[0]:pad_bounds[1]]  # fft reconstruction w/o pad
+
+    pad_len = util.compute_pad_length(z_test)
+    z_pad, pad_bounds = util.pad_signal(z_test, L=pad_len)
+    if spectrum_thresh is None:
+        fft_dict_test = util.extract_low_pass_components(z_pad, dt, max_freq=max_freq_fft)
+    else:
+        fft_dict_test = util.extract_low_pass_components_cdf_thresh(z_pad, dt, cdf_thresh=spectrum_thresh)
+    fft_dict_test['truth'] = fft_dict_test['truth'][pad_bounds[0]:pad_bounds[1]]  # fft reconstruction w/o pad
 
     # store everything important
-    fft_dict['raw'] = z_train
-    fft_dict['raw_test'] = z_test
-    fft_dict['truth'] = fft_dict['truth'][pad_bounds[0]:pad_bounds[1]]  # fft reconstruction w/o padded portions
-    fft_dict['dt'] = dt
+    fft_dict_train['raw'] = z_train
+    fft_dict_test['raw'] = z_test
+    fft_dict_train['dt'] = dt
+    fft_dict_test['dt'] = dt
 
-    return fft_dict
+    return {'train': fft_dict_train, 'test': fft_dict_test}
 
 
 def pos_mse_context(pre_context, filter_values):
@@ -98,14 +110,14 @@ def pos_mse_context(pre_context, filter_values):
     return pos_mse_ctx
 
 
-def vel_mse_precontext(selections, max_freq_fft=2.0):
+def vel_mse_precontext(selections, max_freq_fft=2.0, spectrum_thresh=None):
     # re-use the same pre-context generation as the position
-    return pos_mse_precontext(selections, max_freq_fft)
+    return pos_mse_precontext(selections, max_freq_fft, spectrum_thresh=spectrum_thresh)
 
 
 def vel_mse_context(pre_context, filter_values):
     # instantiate the context data class
-    vel_mse_ctx = opt_util.VelocityErrorContext
+    vel_mse_ctx = opt_util.VelocityErrorContext()
 
     # populate with values
     vel_mse_ctx.truth_position = pre_context['truth']
@@ -115,19 +127,27 @@ def vel_mse_context(pre_context, filter_values):
     return vel_mse_ctx
 
 
-def spread_max_precontext(selection, max_freq_fft=2.0, cluster_cdf_threshold=.9):
+def spread_max_precontext(selections, max_freq_fft=2.0, cluster_cdf_threshold=.9, dt=1/(24*60)):
     conn = util.connect('btc', db_root='../data')
 
     # get training data
-    train_price_df = util.fetch_price_space(conn=conn, selection=selection)
-    dt = len(train_price_df.Date.unique()) / len(train_price_df)
-    z_train = (train_price_df.Open.values - train_price_df.Open.values[0]) / train_price_df.Open.values[0]
+    train_price_df = util.fetch_price_space(conn=conn, selection=selections['train'])
+
+    # get test data
+    test_price_df = util.fetch_price_space(conn=conn, selection=selections['test'])
+
+    # read in measurement data
+    z_train, z_test = ((train_price_df.Open.values - train_price_df.Open.values[0]) / train_price_df.Open.values[0],
+                       (test_price_df.Open.values - test_price_df.Open.values[0]) / test_price_df.Open.values[0])
+
+    # compute clusters on the training/test sets
     cluster_train = compute_cluster_dict(z_train, max_freq_fft, cluster_cdf_threshold, dt)
+    cluster_test = compute_cluster_dict(z_test, max_freq_fft, cluster_cdf_threshold, dt)
 
     # assemble the precontext
-    pre_context = dict({'raw': z_train,
-                        'cluster_dict': cluster_train})
-    return pre_context
+    spread_pre_context = dict({'train': {'raw': z_train, 'cluster_dict': cluster_train, 'dt': dt},
+                               'test': {'raw': z_test, 'cluster_dict': cluster_test, 'dt': dt}})
+    return spread_pre_context
 
 
 def spread_max_context(pre_context, filter_values):
@@ -150,10 +170,10 @@ def phase_align_context(pre_context, filter_values):
     return phase_align_ctx
 
 
-def build_objective_precontext(selection, max_freq=2.0, obj_name='pos_mse', cluster_cdf=.9):
+def build_objective_precontext(selection, obj_name='pos_mse', max_freq=2.0, spectrum_thresh=None, cluster_cdf=.9):
     # build the appropriate data class for the objective function
     if obj_name == 'pos_mse':
-        pre_ctx = pos_mse_precontext(selection, max_freq)
+        pre_ctx = pos_mse_precontext(selection, max_freq, spectrum_thresh=spectrum_thresh)
     elif obj_name == 'vel_mse':
         pre_ctx = vel_mse_precontext(selection, max_freq)
     elif obj_name == 'spread_max':
@@ -208,46 +228,58 @@ def train_filter_bank_adam(filter_bank,
     v_q = np.zeros_like(q_log)
     m_r = np.zeros_like(r_log)
     v_r = np.zeros_like(r_log)
-    losses = np.zeros(n_epochs)
+    losses = np.zeros((n_epochs, 2))
+
+    pre_context_train = data['train']
+    pre_context_test = data['test']
 
     for epoch in range(n_epochs):
 
-        # Compute current loss
-        filter_dict = run_filter_bank(filter_bank, data['raw'], verbose=False)
-        obj_ctx = build_objective_context(data, filter_dict['x'], objective_name)
-        loss = loss_fn(obj_ctx)
-        losses[epoch] = loss
+        # Compute current losses
+        filter_bank.reset_states()
+        filter_dict = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
+        obj_ctx = build_objective_context(pre_context_train, filter_dict['x'], objective_name)
+        train_loss = loss_fn(obj_ctx)
 
-        print(f"Epoch {epoch + 1}/{n_epochs}, Loss: {loss:.6f}")
+        filter_bank.reset_states()
+        filter_dict_test = run_filter_bank(filter_bank, pre_context_test['raw'], verbose=False)
+        obj_ctx_test = build_objective_context(pre_context_test, filter_dict_test['x'], objective_name)
+        test_loss = loss_fn(obj_ctx_test)
+
+        losses[epoch] = [train_loss, test_loss]
+        print(f"Epoch {epoch}/{n_epochs}, Loss: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
         print(f'\tQ Scalars: {q_log}')
         print(f'\tR Scalars: {r_log}')
-        # plot_filter_bank(data['raw'], filter_dict, data['dt'])
 
         # Initialize gradient arrays
         grad_q = np.zeros_like(filter_bank.sigma_xi)
         grad_r = np.zeros_like(filter_bank.sigma_xi)
 
         # Estimate gradient for each filter and each parameter
-        for i in tqdm(range(n_filters)):
+        print(f'\nTraining filters...')
+        for i in range(n_filters):
+            print(f'\tAdjusting filter {i+1}/{n_filters}')
             # adjust Q
             orig_value = q_log[i]
 
             # Perturb positively, run filter bank
+            filter_bank.reset_states()
             q_linear[i] = 10**(orig_value + autograd_epsilon)
             filter_bank.filters[i].set_q(q_linear[i])
-            filter_dict_plus = run_filter_bank(filter_bank, data['raw'], verbose=False)
+            filter_dict_plus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
 
             # compute loss for positive perturbation
-            obj_ctx = build_objective_context(data, filter_dict_plus['x'], objective_name)
+            obj_ctx = build_objective_context(pre_context_train, filter_dict_plus['x'], objective_name)
             loss_plus = loss_fn(obj_ctx)
 
             # Perturb negatively
+            filter_bank.reset_states()
             q_linear[i] = 10**(orig_value - autograd_epsilon)
             filter_bank.filters[i].set_q(q_linear[i])
-            filter_dict_minus = run_filter_bank(filter_bank, data['raw'], verbose=False)
+            filter_dict_minus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
 
             # compute loss for negative perturbation
-            obj_ctx = build_objective_context(data, filter_dict_minus['x'], objective_name)
+            obj_ctx = build_objective_context(pre_context_train, filter_dict_minus['x'], objective_name)
             loss_minus = loss_fn(obj_ctx)
 
             # Restore original parameter
@@ -261,21 +293,23 @@ def train_filter_bank_adam(filter_bank,
             orig_r = r_log[i]
 
             # Perturb log space positively
+            filter_bank.reset_states()
             r_linear[i] = 10**(orig_r + autograd_epsilon)
             filter_bank.filters[i].set_r(r_linear[i])
-            filter_dict_plus = run_filter_bank(filter_bank, data['raw'], verbose=False)
+            filter_dict_plus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
 
             # compute loss for positive perturbation
-            obj_ctx = build_objective_context(data, filter_dict_plus['x'], objective_name)
+            obj_ctx = build_objective_context(pre_context_train, filter_dict_plus['x'], objective_name)
             loss_plus = loss_fn(obj_ctx)
 
             # Perturb log space negatively, convert to linear, compute loss
+            filter_bank.reset_states()
             r_linear[i] = 10**(orig_r - autograd_epsilon)
             filter_bank.filters[i].set_r(r_linear[i])
-            filter_dict_minus = run_filter_bank(filter_bank, data['raw'], verbose=False)
+            filter_dict_minus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
 
             # compute loss for negative perturbation
-            obj_ctx = build_objective_context(data, filter_dict_minus['x'], objective_name)
+            obj_ctx = build_objective_context(pre_context_train, filter_dict_minus['x'], objective_name)
             loss_minus = loss_fn(obj_ctx)
 
             # Restore original linear value of rho
@@ -308,17 +342,31 @@ def train_filter_bank_adam(filter_bank,
                 f.P *= 1e5
 
     # Final loss reporting
-    filter_dict = run_filter_bank(filter_bank, data['raw'], verbose=False)
-    loss = loss_fn(data, filter_dict)
-    print(f"Final Loss after {n_epochs} epochs: {loss:.6f}")
-    plt.plot(range(n_epochs), losses)
+    filter_bank.reset_states()
+    filter_dict = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
+    obj_ctx = build_objective_context(pre_context_train, filter_dict['x'], objective_name)
+    train_loss = loss_fn(obj_ctx)
+
+    filter_bank.reset_states()
+    filter_dict_test = run_filter_bank(filter_bank, pre_context_test['raw'], verbose=False)
+    obj_ctx_test = build_objective_context(pre_context_test, filter_dict_test['x'], objective_name)
+    test_loss = loss_fn(obj_ctx_test)
+
+    print(f"\n\nFinal Loss after {n_epochs} epochs: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
+    # Display the optimised noise parameters
+    print(f'Fitted Q Exponents: {q_log}')
+    print(f'Fitted R Exponents: {r_log}')
+
+    plt.plot(range(1, n_epochs+1), losses)
+    plt.legend(['train', 'test'])
+    plt.title(objective_name)
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
 
     return filter_bank
 
 
-def plot_filter_bank(meas, bank_dict, dt):
+def plot_filter_bank(meas, bank_dict, dt, objective_function, context=None):
     # extract values
     bank_x = bank_dict['x']
     amp = bank_dict['amp']
@@ -327,20 +375,31 @@ def plot_filter_bank(meas, bank_dict, dt):
     # plot filter estimates and system dynamics
     t = np.arange(0, len(meas) * dt, dt)
     fig, axs = plt.subplots(2, 2, figsize=(12, 10))
-    axs[0, 0].scatter(t, meas, color='red', s=5)
-    axs[0, 0].plot(t, bank_x[:, 0], color='k')
-    axs[0, 0].set_title(f'Position Estimation')
+    if objective_function == 'spread_max':
+        spread = meas - bank_x[:, 0]
+        positive_idx, negative_idx = spread > 0, spread < 0
+        axs[0, 0].scatter(t[positive_idx], spread[positive_idx], s=5, color='green')
+        axs[0, 0].scatter(t[negative_idx], spread[negative_idx], s=5, color='red')
+        axs[0, 0].set_title(f'Spread')
+    else:
+        axs[0, 0].scatter(t, meas, color='red', s=5, label=bank_dict['omega'])
+        axs[0, 0].plot(t, bank_x[:, 0], color='k')
+        axs[0, 0].legend()
+        axs[0, 0].set_title(f'Position Estimation')
 
-    axs[1, 0].plot(t, bank_x[:, 1], color='k')
+    axs[1, 0].plot(t, bank_x[:, 1], color='k', label=bank_dict['omega'])
+    axs[1, 0].legend()
     axs[1, 0].set_title(f'Velocity Estimation')
 
     axs[0, 1].plot(t, amp)
+    axs[0, 1].legend()
     axs[0, 1].set_title(f'Amplitude Estimation')
 
-    axs[1, 1].plot(t, np.abs(phase))
-    axs[1, 1].set_title(f'(Absolute) Phase Estimation')
+    axs[1, 1].plot(t, phase, label=bank_dict['omega'])
+    axs[1, 1].legend()
+    axs[1, 1].set_title(f'Phase Estimation')
 
-    plt.show()
+    return fig
 
 
 if __name__ == "__main__":
@@ -357,20 +416,20 @@ if __name__ == "__main__":
     test_selection = util.selector()
     test_selection.start_time = datetime.datetime(2025, 8, 11).timestamp()
     test_selection.stop_time = datetime.datetime(2025, 8, 12).timestamp() - 1
+    data_selection = {'train': train_selection,
+                      'test': test_selection}
 
     # construct full precontext
-    # data_selection = {'train': train_selection,
-    #                   'test': test_selection}
-    objective = 'pos_mse'
-    pre_context = build_objective_precontext(selection=train_selection, obj_name=objective)
+    objective = 'vel_mse'
+    pre_context = build_objective_precontext(selection=data_selection, obj_name=objective)
 
     # Construct the filter bank w/ the following sinusoidal frequencies
     omegas = np.array([0.02, 0.66, 2.04, 3.9])
     fbank = SinusoidalFilterBank(
         omegas=omegas,
-        dt=pre_context['dt'],
-        sigma_xi=[1e1]*len(omegas),
-        rho=[1e-1]*len(omegas),
+        dt=pre_context['train']['dt'],
+        sigma_xi=[10**0.5]*len(omegas),
+        rho=[10**-0.5]*len(omegas),
     )
 
     # warm up the filter bank's P matrix
@@ -378,23 +437,26 @@ if __name__ == "__main__":
     # fbank.P = filter_out['p'][-1]
 
     # Train the filter bank
+    alphas = {'pos_mse': 2.5e-2,  # [q=.5, r=-.5]
+              'vel_mse': 5e-2,  # [q=.5, r=-.5]
+              'spread_max': 1e-2,  # [q=0, r=0]
+              'phase_alignment': 2.5e-2}
     trained_filter_bank = train_filter_bank_adam(filter_bank=fbank,
                                                  data=pre_context,
                                                  objective_name=objective,
-                                                 n_epochs=10,
-                                                 alpha=1e-1,  # 2.5e-1,
+                                                 n_epochs=12,
+                                                 alpha=alphas[objective],
                                                  reset_cov=False)
 
-    # reset the base filter
-    for i, f in enumerate(trained_filter_bank.filters):
-        f.x = np.zeros_like(f.x)
+    # reset the filters
+    trained_filter_bank.reset_states()
 
     # run and plot the trained filter
-    trained_filter_dict = run_filter_bank(trained_filter_bank, pre_context['raw'])
-    plot_filter_bank(pre_context['raw'], trained_filter_dict, pre_context['dt'])
+    trained_filter_dict = run_filter_bank(trained_filter_bank, pre_context['test']['raw'])
+    fig = plot_filter_bank(pre_context['test']['raw'],
+                           trained_filter_dict,
+                           pre_context['test']['dt'],
+                           objective_function=objective)
+    plt.show(block=True)
 
-    # Display the optimised noise parameters
-    for idx, filt in enumerate(trained_filter_bank.filters):
-        q_diag = np.diag(filt.Q)
-        r_val = float(filt.R[0, 0])
-        print(f"Filter {idx}: Q diag = {q_diag}, R = {r_val}")
+
