@@ -185,7 +185,7 @@ def run_filter_bank(fbank, measurements, verbose=True):
         all_amp[k] = fbank.amplitudes()
         all_phi[k] = fbank.phases()
 
-    return {'x': all_states, 'p': all_covs, 'w': all_weights, 'amp': all_amp, 'phi': all_phi, 'omega': fbank.omega}
+    return {'x': all_states, 'p': all_covs, 'w': all_weights, 'amp': all_amp, 'phi': all_phi, 'omega': fbank.omegas}
 
 
 def create_sig_dict(price_df, random_date=True):
