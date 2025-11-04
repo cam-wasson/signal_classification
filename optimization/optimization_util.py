@@ -119,14 +119,19 @@ class SpreadMaxContext:
     measurement: np.array
     filter_state: np.array
     cluster_dictionary: dict
+    dt: float
 
-    def __init__(self, measurement=np.array([]), filter_state=np.array([]), cluster_dictionary=dict):
+    def __init__(self, measurement=np.array([]), filter_state=np.array([]), cluster_dictionary=dict, dt=None):
         self.measurement = measurement
         self.filter_state = filter_state
         self.cluster_dictionary = cluster_dictionary
+        if dt is not None:
+            self.dt = dt
+        else:
+            self.dt = 1/(24*60)
 
 
-def spread_max(context: SpreadMaxContext, penalty=1.2):
+def spread_max(context: SpreadMaxContext):
     # extract data
     filter_state = context.filter_state
     measurements = context.measurement
@@ -139,20 +144,33 @@ def spread_max(context: SpreadMaxContext, penalty=1.2):
 
     # compute spread
     spread = scaled_truth - scaled_filter
+    tanh_spread = np.tanh(spread).flatten()
 
     # compute the total values of the spread for each cluster type
-    max_cluster_values = spread[np.concatenate(cluster_dict['cluster_max']['x_points'])]
-    min_cluster_values = spread[np.concatenate(cluster_dict['cluster_min']['x_points'])]
-    bad_max_idx = max_cluster_values < 0
-    bad_min_idx = min_cluster_values > 0
+    max_idx, min_idx = (np.concatenate(cluster_dict['cluster_max']['x_points']),
+                        np.concatenate(cluster_dict['cluster_min']['x_points']))
+    max_cluster_values, min_cluster_values = tanh_spread[max_idx], tanh_spread[min_idx]
 
-    # compute the total spread distance
-    good_score = sum(max_cluster_values[~bad_max_idx]) + sum(np.abs(min_cluster_values[~bad_min_idx]))
-    bad_score = penalty * (sum(np.abs(max_cluster_values[bad_max_idx])) +
-                           sum(np.abs(min_cluster_values[bad_min_idx])))
+    # --- 1. Stationarity penalty (second derivative = smoothness)
+    not_stationary_idx = np.zeros_like(tanh_spread).flatten()
+    not_stationary_idx[np.concatenate([max_idx, min_idx])] = 1
+    L_stationary = np.mean(np.abs(tanh_spread[not_stationary_idx == 0]))
+
+    # --- 2. Sign consistency via tanh
+    # For maxima: want tanh(y) ≈ +1 → penalize (1 - tanh(y))^2
+    L_max = np.mean((1 - np.tanh(max_cluster_values)) ** 2)
+
+    # For minima: want tanh(y) ≈ -1 → penalize (1 + tanh(y))^2
+    L_min = np.mean((1 + np.tanh(min_cluster_values)) ** 2)
+
+    # --- 3. Gain. Loss decreases when this increases. Subtract mean min values from mean max values
+    gain = np.mean(max_cluster_values) - np.mean(min_cluster_values)
+
+    # --- Combine
+    loss = L_stationary + L_max + L_min - gain
 
     # convert to loss -- as total spread increases, the loss decreases
-    return 1 / max((good_score - bad_score), 10**-8)
+    return loss
 
 
 class PhaseAlignmentContext:
