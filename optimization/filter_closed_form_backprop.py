@@ -25,6 +25,7 @@ gradients when available.
 from __future__ import annotations
 
 import datetime
+from dataclasses import dataclass
 
 from matplotlib import use as muse
 import matplotlib.pyplot as plt
@@ -403,6 +404,50 @@ def plot_filter_bank(meas, bank_dict, dt, objective_function, context=None):
     return fig
 
 
+# @dataclass
+class RunConfig:
+    train_times: list
+    test_times: list
+    data_selections: dict
+    objective: str
+    fft_max_freq: dict
+    label_cluster_cdf_thresh: dict
+    omegas: dict
+    omega_arr: np.array
+    sigma_xi0: dict
+    sigma_xi0_arr: np.array
+    rho0: dict
+    rho0_arr: np.array
+    filter_bank_config = dict
+
+    def __init__(self, train_times, test_times, objective_str):
+        # assign some values
+        self.train_times = train_times
+        self.test_times = test_times
+        self.objective = objective_str
+
+        # build the train/test selections
+        self.build_selections()
+
+        # build the filter bank config
+        self.build_filter_bank_config()
+
+    def build_selections(self):
+        # build training selection
+        train_selector = util.selector()
+        train_selection.start_time = self.train_times[0]
+        train_selection.stop_time = self.train_times[1]
+
+        # build test selection
+        test_selector = util.selector()
+        test_selection.start_time = self.test_times[0]
+        test_selection.stop_time = self.test_times[1]
+        self.data_selections = {'train': train_selector,
+                                'test': test_selector}
+
+    def build_filter_bank_config(self):
+
+
 if __name__ == "__main__":
     import pandas as pd
     sys.path.append('..')
@@ -430,7 +475,6 @@ if __name__ == "__main__":
     # Construct the filter bank w/ the following sinusoidal frequencies
     # omegas = np.array([0.02, 0.34, 0.66, 2.04, 3.9])
     omegas = np.array([0.02, 0.66, 2.04, 3.9])
-    logs = {''}
     fbank = SinusoidalFilterBank(
         omegas=omegas,
         dt=pre_context['train']['dt'],
