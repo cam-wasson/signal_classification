@@ -15,7 +15,7 @@ sys.path.append('../kalman_filter_bank')
 sys.path.append('..')
 
 import util
-from filter_bank import SinusoidalFilterBank, SinusoidalCMMEAFilterBank, run_filter_bank
+from kalman_filter_bank import SinusoidalFilterBank, run_filter_bank
 from Labelling.ExtremaCluster import compute_cluster_dict
 
 muse('Qt5Agg')
