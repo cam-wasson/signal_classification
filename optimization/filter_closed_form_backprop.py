@@ -31,11 +31,15 @@ import matplotlib.pyplot as plt
 
 import numpy as np
 import optimization_util as opt_util
-from tqdm import tqdm
+import time
 
 import sys
 sys.path.append('../kalman_filter_bank')
+<<<<<<< HEAD
 from kalman_filter_bank import SinusoidalFilterBank, run_filter_bank
+=======
+from filter_bank import SinusoidalFilterBank, SinusoidalCMMEAFilterBank, run_filter_bank
+>>>>>>> d693e80f44bf3d8a56886c061ece94e47b527bf3
 from Labelling.ExtremaCluster import compute_cluster_dict
 
 muse('Qt5Agg')
@@ -150,15 +154,16 @@ def spread_max_precontext(selections, max_freq_fft=2.0, cluster_cdf_threshold=.9
     return spread_pre_context
 
 
-def spread_max_context(pre_context, filter_values):
+def spread_max_context(pre_context, filter_values, dt=None):
+    # assign dt value
+    if 'dt' in pre_context.keys() and dt is None:
+        dt = pre_context['dt']
+
     # instantiate the context data class
-    spread_max_ctx = opt_util.SpreadMaxContext
-
-    # populate with values
-    spread_max_ctx.measurement = pre_context['raw']
-    spread_max_ctx.filter_state = filter_values
-    spread_max_ctx.cluster_dictionary = pre_context['cluster_dict']
-
+    spread_max_ctx = opt_util.SpreadMaxContext(measurement=pre_context['raw'],
+                                               filter_state=filter_values,
+                                               cluster_dictionary=pre_context['cluster_dict'],
+                                               dt=dt)
     return spread_max_ctx
 
 
@@ -233,6 +238,7 @@ def train_filter_bank_adam(filter_bank,
     pre_context_train = data['train']
     pre_context_test = data['test']
 
+    tStart = time.time()
     for epoch in range(n_epochs):
 
         # Compute current losses
@@ -356,6 +362,7 @@ def train_filter_bank_adam(filter_bank,
     # Display the optimised noise parameters
     print(f'Fitted Q Exponents: {q_log}')
     print(f'Fitted R Exponents: {r_log}')
+    print(f'Run Time: {(time.time() - tStart)/60} mins')
 
     plt.plot(range(1, n_epochs+1), losses)
     plt.legend(['train', 'test'])
@@ -375,23 +382,21 @@ def plot_filter_bank(meas, bank_dict, dt, objective_function, context=None):
     # plot filter estimates and system dynamics
     t = np.arange(0, len(meas) * dt, dt)
     fig, axs = plt.subplots(2, 2, figsize=(12, 10))
-    if objective_function == 'spread_max':
-        spread = meas - bank_x[:, 0]
+    if objective_function == 'spread_max' or objective_function == 'pos_mse':
+        spread = np.tanh(meas - bank_x[:, 0])
         positive_idx, negative_idx = spread > 0, spread < 0
         axs[0, 0].scatter(t[positive_idx], spread[positive_idx], s=5, color='green')
         axs[0, 0].scatter(t[negative_idx], spread[negative_idx], s=5, color='red')
         axs[0, 0].set_title(f'Spread')
     else:
-        axs[0, 0].scatter(t, meas, color='red', s=5, label=bank_dict['omega'])
+        axs[0, 0].scatter(t, meas, color='red', s=5)
         axs[0, 0].plot(t, bank_x[:, 0], color='k')
-        axs[0, 0].legend()
         axs[0, 0].set_title(f'Position Estimation')
 
-    axs[1, 0].plot(t, bank_x[:, 1], color='k', label=bank_dict['omega'])
-    axs[1, 0].legend()
+    axs[1, 0].plot(t, bank_x[:, 1], color='k')
     axs[1, 0].set_title(f'Velocity Estimation')
 
-    axs[0, 1].plot(t, amp)
+    axs[0, 1].plot(t, amp, label=bank_dict['omega'])
     axs[0, 1].legend()
     axs[0, 1].set_title(f'Amplitude Estimation')
 
@@ -420,17 +425,28 @@ if __name__ == "__main__":
                       'test': test_selection}
 
     # construct full precontext
-    objective = 'vel_mse'
-    pre_context = build_objective_precontext(selection=data_selection, obj_name=objective)
+    objective = 'pos_mse'
+    pre_context = build_objective_precontext(selection=data_selection,
+                                             obj_name=objective,
+                                             max_freq=5,
+                                             cluster_cdf=.95)
 
     # Construct the filter bank w/ the following sinusoidal frequencies
+    # omegas = np.array([0.02, 0.34, 0.66, 2.04, 3.9])
     omegas = np.array([0.02, 0.66, 2.04, 3.9])
+    logs = {''}
     fbank = SinusoidalFilterBank(
         omegas=omegas,
         dt=pre_context['train']['dt'],
         sigma_xi=[10**0.5]*len(omegas),
         rho=[10**-0.5]*len(omegas),
     )
+    # fbank = SinusoidalCMMEAFilterBank(
+    #     omegas=omegas,
+    #     dt=pre_context['train']['dt'],
+    #     sigma_xi=[10**0.0]*len(omegas),
+    #     rho=[10**-0.0]*len(omegas),
+    # )
 
     # warm up the filter bank's P matrix
     # filter_out = run_filter_bank(fbank, fft_dict['raw'][:200], verbose=False)
@@ -439,24 +455,32 @@ if __name__ == "__main__":
     # Train the filter bank
     alphas = {'pos_mse': 2.5e-2,  # [q=.5, r=-.5]
               'vel_mse': 5e-2,  # [q=.5, r=-.5]
-              'spread_max': 1e-2,  # [q=0, r=0]
+              'spread_max': 2.5e-2,  # [q=0, r=0]
               'phase_alignment': 2.5e-2}
     trained_filter_bank = train_filter_bank_adam(filter_bank=fbank,
                                                  data=pre_context,
                                                  objective_name=objective,
-                                                 n_epochs=12,
+                                                 n_epochs=14,
                                                  alpha=alphas[objective],
                                                  reset_cov=False)
 
-    # reset the filters
-    trained_filter_bank.reset_states()
-
     # run and plot the trained filter
-    trained_filter_dict = run_filter_bank(trained_filter_bank, pre_context['test']['raw'])
-    fig = plot_filter_bank(pre_context['test']['raw'],
-                           trained_filter_dict,
-                           pre_context['test']['dt'],
-                           objective_function=objective)
+    dataset = ['train', 'test']
+    for d in dataset:
+        # reset the filters
+        trained_filter_bank.reset_states()
+        # run and plot
+        trained_filter_dict = run_filter_bank(trained_filter_bank, pre_context[d]['raw'])
+        fig = plot_filter_bank(pre_context[d]['raw'],
+                               trained_filter_dict,
+                               pre_context[d]['dt'],
+                               objective_function=objective)
+        plt.figure()
+        t = np.arange(0, len(pre_context[d]['raw']))*pre_context[d]['dt']
+        plt.plot(t, pre_context[d]['raw'], label='meas')
+        plt.plot(t, trained_filter_dict['x'][:, 0], label='filter')
+        plt.xlabel('Days')
+    plt.legend()
     plt.show(block=True)
 
 
