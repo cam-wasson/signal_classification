@@ -1,41 +1,20 @@
-"""
-option1_closed_form_script.py
-================================
-
-This script illustrates how one might begin to optimise the process
-and measurement noise covariances (``Q`` and ``R``) of a bank of
-sinusoidal Kalman filters using gradient‑based methods.  The goal is
-to demonstrate an end‑to‑end optimisation loop for ``Q`` and ``R``
-given a differentiable objective function.  In practice, closed‑form
-backpropagation formulas exist for the Kalman filter, but deriving and
-implementing them from scratch can be challenging.  Here we provide a
-minimal example that uses finite‑difference gradients as a proxy for
-the analytic derivatives.  This example is meant as a stepping stone
-towards implementing the fully analytical approach described in the
-report.
-
-Note: For real applications or larger systems, a more sophisticated
-approach should be used.  Closed‑form derivative formulas provide
-greater efficiency and numerical stability as discussed in the
-accompanying report and references【355793402231865†L93-L104】.  This
-script offers a template that can later be replaced with analytic
-gradients when available.
-"""
-
 from __future__ import annotations
 
 import datetime
-from dataclasses import dataclass
-
+# from dataclasses import dataclass
 from matplotlib import use as muse
 import matplotlib.pyplot as plt
-
 import numpy as np
-import optimization_util as opt_util
+import pprint
 import time
+
+import optimization_util as opt_util
 
 import sys
 sys.path.append('../kalman_filter_bank')
+sys.path.append('..')
+
+import util
 from filter_bank import SinusoidalFilterBank, SinusoidalCMMEAFilterBank, run_filter_bank
 from Labelling.ExtremaCluster import compute_cluster_dict
 
@@ -146,8 +125,14 @@ def spread_max_precontext(selections, max_freq_fft=2.0, cluster_cdf_threshold=.9
     cluster_test = compute_cluster_dict(z_test, max_freq_fft, cluster_cdf_threshold, dt)
 
     # assemble the precontext
-    spread_pre_context = dict({'train': {'raw': z_train, 'cluster_dict': cluster_train, 'dt': dt},
-                               'test': {'raw': z_test, 'cluster_dict': cluster_test, 'dt': dt}})
+    spread_pre_context = dict({'train': {'raw': z_train,
+                                         'truth': cluster_train['fft_dict']['truth'],
+                                         'cluster_dict': cluster_train,
+                                         'dt': dt},
+                               'test': {'raw': z_test,
+                                        'truth': cluster_test['fft_dict']['truth'],
+                                        'cluster_dict': cluster_test,
+                                        'dt': dt}})
     return spread_pre_context
 
 
@@ -255,8 +240,8 @@ def train_filter_bank_adam(filter_bank,
         print(f'\tR Scalars: {r_log}')
 
         # Initialize gradient arrays
-        grad_q = np.zeros_like(filter_bank.sigma_xi)
-        grad_r = np.zeros_like(filter_bank.sigma_xi)
+        grad_q = np.zeros_like(filter_bank.sigma_xi, dtype=float)
+        grad_r = np.zeros_like(filter_bank.sigma_xi, dtype=float)
 
         # Estimate gradient for each filter and each parameter
         print(f'\nTraining filters...')
@@ -366,161 +351,258 @@ def train_filter_bank_adam(filter_bank,
     plt.title(objective_name)
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
+    plt.savefig(f'{data["save_root"]}\\loss_plot.png')
+    plt.clf()
 
-    return filter_bank
+    return filter_bank, q_log, r_log
 
 
-def plot_filter_bank(meas, bank_dict, dt, objective_function, context=None):
+def plot_filter_bank(meas, bank_dict, dt, objective_function, truth_pos=None):
     # extract values
     bank_x = bank_dict['x']
     amp = bank_dict['amp']
     phase = bank_dict['phi']
 
-    # plot filter estimates and system dynamics
-    t = np.arange(0, len(meas) * dt, dt)
-    fig, axs = plt.subplots(2, 2, figsize=(12, 10))
-    if objective_function == 'spread_max' or objective_function == 'pos_mse':
-        spread = np.tanh(meas - bank_x[:, 0])
-        positive_idx, negative_idx = spread > 0, spread < 0
-        axs[0, 0].scatter(t[positive_idx], spread[positive_idx], s=5, color='green')
-        axs[0, 0].scatter(t[negative_idx], spread[negative_idx], s=5, color='red')
-        axs[0, 0].set_title(f'Spread')
-    else:
-        axs[0, 0].scatter(t, meas, color='red', s=5)
-        axs[0, 0].plot(t, bank_x[:, 0], color='k')
-        axs[0, 0].set_title(f'Position Estimation')
+    # create plot
+    t_plot = np.arange(0, len(meas) * dt, dt)
+    figure, axs = plt.subplots(2, 2, figsize=(12, 10))
+    figure.suptitle(objective_function)
 
-    axs[1, 0].plot(t, bank_x[:, 1], color='k')
+    # plot spread
+    spread = np.tanh(meas - bank_x[:, 0])
+    positive_idx, negative_idx = spread > 0, spread < 0
+    axs[0, 0].scatter(t_plot[positive_idx], spread[positive_idx], s=5, color='green')
+    axs[0, 0].scatter(t_plot[negative_idx], spread[negative_idx], s=5, color='red')
+    axs[0, 0].set_title(f'Tanh Spread')
+
+    # axs[0, 0].scatter(t, meas, color='red', s=5)
+    # axs[0, 0].plot(t, bank_x[:, 0], color='k')
+    # axs[0, 0].set_title(f'Position Estimation')
+
+    # plot velocity
+    axs[1, 0].plot(t_plot, bank_x[:, 1], color='k', label='filter estimate')
     axs[1, 0].set_title(f'Velocity Estimation')
+    if truth_pos is not None:
+        axs[1, 0].plot(t_plot, np.gradient(truth_pos)/dt, color='orange', alpha=.5, label='truth extraction')
+    axs[1, 0].legend()
 
-    axs[0, 1].plot(t, amp, label=bank_dict['omega'])
+    # plot amplitude
+    axs[0, 1].plot(t_plot, amp, label=bank_dict['omega'])
     axs[0, 1].legend()
     axs[0, 1].set_title(f'Amplitude Estimation')
 
-    axs[1, 1].plot(t, phase, label=bank_dict['omega'])
+    # plot phase
+    axs[1, 1].plot(t_plot, phase, label=bank_dict['omega'])
     axs[1, 1].legend()
     axs[1, 1].set_title(f'Phase Estimation')
 
-    return fig
+    return figure
 
 
 # @dataclass
 class RunConfig:
+    # input items
     train_times: list
     test_times: list
-    data_selections: dict
     objective: str
-    fft_max_freq: dict
-    label_cluster_cdf_thresh: dict
-    omegas: dict
+    # initialized in object
+    fft_max_freq_dict: dict
+    label_cluster_cdf_thresh_dict: dict
+    omega_dict: dict
+    sigma_xi0_dict: dict
+    rho0_dict: dict
+    alpha_dict: dict
+    epoch_dict: dict
+    # extracted in object
+    data_selections: dict
     omega_arr: np.array
-    sigma_xi0: dict
-    sigma_xi0_arr: np.array
-    rho0: dict
-    rho0_arr: np.array
-    filter_bank_config = dict
+    # assembled in object
+    filter_bank_config: dict
+    truth_extraction_config: dict
+    grad_desc_config: dict
 
     def __init__(self, train_times, test_times, objective_str):
-        # assign some values
+        # assign input values
         self.train_times = train_times
         self.test_times = test_times
         self.objective = objective_str
 
+        # create the structures to choose hyperparams based on objective function
+        self.init_filter_bank_parameters()
+        self.init_truth_extraction_parameters()
+        self.init_grad_desc_parameters()
+
         # build the train/test selections
         self.build_selections()
+
+        # build the truth extraction config
+        self.build_truth_extraction_config()
 
         # build the filter bank config
         self.build_filter_bank_config()
 
+        # build the gradient descent config
+        self.build_grad_desc_config()
+
+    def init_filter_bank_parameters(self):
+        self.omega_dict = {'pos_mse': np.array([0.02, 0.66, 2.04, 3.9]),
+                           'vel_mse': np.array([0.02, 0.66, 2.04, 3.9]),
+                           'spread_max': np.array([0.02, 0.1, .25, 0.66])}
+        n_omega = len(self.omega_dict[self.objective])
+        self.rho0_dict = {'pos_mse': [10**(-0.5)]*n_omega,  # replace rho0/sigmaXi0 w/ grid search results
+                          'vel_mse': [10**(-0.5)]*n_omega,
+                          'spread_max': 10**np.array([0.46352044,  0.5294198,   0.67744341, -0.19491549])}
+        self.sigma_xi0_dict = {'pos_mse': [10**0.5]*n_omega,
+                               'vel_mse': [10**0.5]*n_omega,
+                               'spread_max': 10**np.array([-1.10086254, -0.99297798, -0.71250029,  0.87094734])}
+
+    def init_truth_extraction_parameters(self):
+        self.fft_max_freq_dict = {'pos_mse': 5,
+                                  'vel_mse': 2,
+                                  'spread_max': 5}
+        self.label_cluster_cdf_thresh_dict = {'pos_mse': .95,
+                                              'vel_mse': .95,
+                                              'spread_max': .95}
+
+    def init_grad_desc_parameters(self):
+        self.alpha_dict = {'pos_mse': 2.5e-2,
+                           'vel_mse': 5e-2,
+                           'spread_max': 2.5e-2}
+        self.epoch_dict = {'pos_mse': 14,
+                           'vel_mse': 12,
+                           'spread_max': 4}
+
     def build_selections(self):
         # build training selection
         train_selector = util.selector()
-        train_selection.start_time = self.train_times[0]
-        train_selection.stop_time = self.train_times[1]
+        train_selector.start_time = self.train_times[0]
+        train_selector.stop_time = self.train_times[1]
 
         # build test selection
         test_selector = util.selector()
-        test_selection.start_time = self.test_times[0]
-        test_selection.stop_time = self.test_times[1]
+        test_selector.start_time = self.test_times[0]
+        test_selector.stop_time = self.test_times[1]
         self.data_selections = {'train': train_selector,
                                 'test': test_selector}
 
     def build_filter_bank_config(self):
+        self.omega_arr = self.omega_dict[self.objective]
+        self.filter_bank_config = {'omegas': self.omega_arr,
+                                   'sigma_xi': self.sigma_xi0_dict[self.objective],
+                                   'rho': self.rho0_dict[self.objective]}
+
+    def build_truth_extraction_config(self):
+        self.truth_extraction_config = {'max_freq': self.fft_max_freq_dict[self.objective],
+                                        'cluster_cdf': self.label_cluster_cdf_thresh_dict[self.objective]}
+
+    def build_grad_desc_config(self):
+        self.grad_desc_config = {'alpha': self.alpha_dict[self.objective],
+                                 'epoch': self.epoch_dict[self.objective]}
+
+    def to_str(self):
+        # init the return string
+        return_str = ''
+
+        # add in data selection
+        return_str += 'Measurement Selection\n'
+        return_str += f'\t Train: {self.train_times}\n'
+        return_str += f'\t Test: {self.test_times}\n'
+
+        # add in filter bank parameters
+        print_me = dict(self.filter_bank_config)
+        print_me['rho'] = np.log10(print_me['rho'])
+        print_me['sigma_xi'] = np.log10(print_me['sigma_xi'])
+        return_str += '\nFilter Bank Parameters:\n'
+        return_str += f'{pprint.pformat(print_me, indent=4, width=80)}\n'
+
+        # add in truth extraction parameters
+        return_str += f'\nTruth Extraction Parameters:\n'
+        return_str += f'{pprint.pformat(self.truth_extraction_config, indent=4, width=80)}\n'
+
+        # add in gradient descent parameters
+        return_str += '\nGradient Descent Parameters:\n'
+        return_str += f'{pprint.pformat(self.grad_desc_config, indent=4, width=80)}\n'
+
+        return return_str
 
 
 if __name__ == "__main__":
-    import pandas as pd
-    sys.path.append('..')
-    import util
+    import os
+    import pickle
 
-    # build training selection
-    train_selection = util.selector()
-    train_selection.start_time = datetime.datetime(2025, 7, 31).timestamp()
-    train_selection.stop_time = datetime.datetime(2025, 8, 10).timestamp() - 1
+    # set initial parameters
+    train_selection = [datetime.datetime(2025, 7, 31).timestamp(), datetime.datetime(2025, 8, 10).timestamp() - 1]
+    test_selection = [datetime.datetime(2025, 8, 11).timestamp(), datetime.datetime(2025, 8, 12).timestamp() - 1]
+    objective = 'spread_max'
+    subdir_str = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+    save_root = f'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\4_Fall\\CS-591\\training_sessions\\{objective}'
+    save_root = f'{save_root}\\{subdir_str}'
+    os.makedirs(save_root)
 
-    # build test selection
-    test_selection = util.selector()
-    test_selection.start_time = datetime.datetime(2025, 8, 11).timestamp()
-    test_selection.stop_time = datetime.datetime(2025, 8, 12).timestamp() - 1
-    data_selection = {'train': train_selection,
-                      'test': test_selection}
+    # construct the run config
+    run_cfg = RunConfig(train_times=train_selection,
+                        test_times=test_selection,
+                        objective_str=objective)
+    # run_cfg.grad_desc_config['epoch'] = 3  # overwrite epochs for testing functionality
 
     # construct full precontext
-    objective = 'pos_mse'
-    pre_context = build_objective_precontext(selection=data_selection,
-                                             obj_name=objective,
-                                             max_freq=5,
-                                             cluster_cdf=.95)
+    pre_context = build_objective_precontext(selection=run_cfg.data_selections,
+                                             obj_name=run_cfg.objective,
+                                             max_freq=run_cfg.truth_extraction_config['max_freq'],
+                                             cluster_cdf=run_cfg.truth_extraction_config['cluster_cdf'])
+    pre_context['save_root'] = save_root
+    with open(f'{save_root}\\{objective}_shot_notes.txt', 'w') as f:
+        f.write('Run Config Notes:\n')
+        f.write(run_cfg.to_str())
+        f.close()
 
     # Construct the filter bank w/ the following sinusoidal frequencies
-    # omegas = np.array([0.02, 0.34, 0.66, 2.04, 3.9])
-    omegas = np.array([0.02, 0.66, 2.04, 3.9])
     fbank = SinusoidalFilterBank(
-        omegas=omegas,
+        omegas=run_cfg.filter_bank_config['omegas'],
         dt=pre_context['train']['dt'],
-        sigma_xi=[10**0.5]*len(omegas),
-        rho=[10**-0.5]*len(omegas),
+        sigma_xi=run_cfg.filter_bank_config['sigma_xi'],
+        rho=run_cfg.filter_bank_config['rho'],
     )
-    # fbank = SinusoidalCMMEAFilterBank(
-    #     omegas=omegas,
-    #     dt=pre_context['train']['dt'],
-    #     sigma_xi=[10**0.0]*len(omegas),
-    #     rho=[10**-0.0]*len(omegas),
-    # )
-
-    # warm up the filter bank's P matrix
-    # filter_out = run_filter_bank(fbank, fft_dict['raw'][:200], verbose=False)
-    # fbank.P = filter_out['p'][-1]
 
     # Train the filter bank
-    alphas = {'pos_mse': 2.5e-2,  # [q=.5, r=-.5]
-              'vel_mse': 5e-2,  # [q=.5, r=-.5]
-              'spread_max': 2.5e-2,  # [q=0, r=0]
-              'phase_alignment': 2.5e-2}
-    trained_filter_bank = train_filter_bank_adam(filter_bank=fbank,
-                                                 data=pre_context,
-                                                 objective_name=objective,
-                                                 n_epochs=14,
-                                                 alpha=alphas[objective],
-                                                 reset_cov=False)
+    trained_filter_bank, q_log_final, r_log_final = train_filter_bank_adam(filter_bank=fbank,
+                                                                           data=pre_context,
+                                                                           objective_name=objective,
+                                                                           n_epochs=run_cfg.grad_desc_config['epoch'],
+                                                                           alpha=run_cfg.grad_desc_config['alpha'],
+                                                                           reset_cov=False)
+    with open(f'{save_root}\\{objective}_shot_notes.txt', 'a') as f:
+        f.write(f'\n\nFinal Q (log10): {q_log_final}\n')
+        f.write(f'Final R (log10): {r_log_final}')
+        f.close()
+    pickle.dump(trained_filter_bank, open(f'{save_root}\\filter_bank.pkl', 'wb'))
+    pickle.dump(run_cfg, open(f'{save_root}\\run_config.pkl', 'wb'))
 
     # run and plot the trained filter
     dataset = ['train', 'test']
     for d in dataset:
         # reset the filters
         trained_filter_bank.reset_states()
-        # run and plot
+
+        # run
         trained_filter_dict = run_filter_bank(trained_filter_bank, pre_context[d]['raw'])
         fig = plot_filter_bank(pre_context[d]['raw'],
                                trained_filter_dict,
                                pre_context[d]['dt'],
-                               objective_function=objective)
+                               objective_function=objective,
+                               truth_pos=pre_context[d]['truth'])
+        # save
+        fig.savefig(f'{save_root}\\filter_quad_plot_{d}.png')
+
+        # plot
         plt.figure()
         t = np.arange(0, len(pre_context[d]['raw']))*pre_context[d]['dt']
         plt.plot(t, pre_context[d]['raw'], label='meas')
         plt.plot(t, trained_filter_dict['x'][:, 0], label='filter')
         plt.xlabel('Days')
-    plt.legend()
-    plt.show(block=True)
+        plt.legend()
+        plt.savefig(f'{save_root}\\meas_filter_plot_{d}.png')
+
+    # plt.show(block=True)
 
 

@@ -11,6 +11,28 @@ def inverse_transform_theta(theta, scale=10):
     return theta / scale
 
 
+def anova_1d(values, labels):
+    # compute initial and easy stuff
+    label_values = np.unique(labels)
+    dof_between, dof_within = (label_values.shape[0] - 1, labels.shape[0] - label_values.shape[0])
+
+    # calculate per class stuff
+    ss_between, ss_within = 0, 0
+    for i in range(label_values.shape[0]):
+        # grab indices for this class/group/label value
+        lab_idx = (labels == label_values[i])
+
+        # calculate sum of the squares of feature values between classes
+        ss_between += len(values[lab_idx]) * np.square(np.abs(np.mean(values[lab_idx]) - np.mean(values)))
+
+        # calculate sum of the squares of feature values  within classes
+        ss_within += np.sum(np.square(np.abs(values[lab_idx] - np.mean(values[lab_idx]))))
+
+    # compute F score
+    f_score = (ss_between / dof_between) / (ss_within / dof_within)
+    return f_score
+
+
 @dataclass
 class PositionErrorContext:
     filter_state: np.array
@@ -198,3 +220,46 @@ def phase_alignment(context: PhaseAlignmentContext):
 
     # promote cosine sims close to 1, -1; punish cosine sim ~0
     return 1 / (np.abs(cosine_sim) - 10 ** -8)
+
+
+@dataclass
+class ANOVAContext:
+    measurement: np.array
+    label_arr: np.array
+    filter_dict: dict
+    dt: float
+
+
+def anova_loss(context: ANOVAContext):
+    # extract values
+    raw = context.measurement
+    filter_state = context.filter_dict['x']
+    amps = context.filter_dict['amp']
+    phis = context.filter_dict['phi']
+    dt = context.dt
+    label_arr = context.label_arr
+
+    # compute tracking feature values
+    spread = raw - filter_state[:, 0]
+    velocity_filter = filter_state[:, 1]
+    velocity_empirical = np.diff(np.concatenate(([0], filter_state[:, 0]))) / dt
+    acceleration_empirical = np.diff(np.concatenate(([0], filter_state[:, 1]))) / dt
+
+    # compute system dynamics feature values
+    amp_dot = np.diff(np.concatenate(([0], amps))) / dt
+    phi_dot = np.diff(np.concatenate(([0], phis))) / dt
+    amp_dot_dot = np.diff(np.concatenate(([0], amp_dot))) / dt
+    phi_dot_dot = np.diff(np.concatenate(([0], phi_dot))) / dt
+
+    # compute final loss
+    total_anova = 0
+
+    total_anova += anova_1d(spread, label_arr)
+    total_anova += anova_1d(velocity_filter, label_arr)
+    total_anova += anova_1d(velocity_empirical, label_arr)
+    total_anova += anova_1d(acceleration_empirical, label_arr)
+
+    total_anova += anova_1d(amp_dot, label_arr)
+    total_anova += anova_1d(phi_dot, label_arr)
+    total_anova += anova_1d(amp_dot_dot, label_arr)
+    total_anova += anova_1d(phi_dot_dot, label_arr)
