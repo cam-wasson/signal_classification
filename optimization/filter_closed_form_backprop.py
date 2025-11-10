@@ -35,7 +35,7 @@ from tqdm import tqdm
 
 import sys
 sys.path.append('../kalman_filter_bank')
-from filter_bank import SinusoidalFilterBank, run_filter_bank
+from kalman_filter_bank import SinusoidalFilterBank, run_filter_bank
 from Labelling.ExtremaCluster import compute_cluster_dict
 
 muse('Qt5Agg')
