@@ -3,7 +3,7 @@ from filterpy.kalman import KalmanFilter
 
 
 class SinusoidalKalmanFilter(KalmanFilter):
-    def __init__(self, dim_x=2, dim_z=1, omega=np.pi/4, dt=0.0, sigma_xi=0.1, rho=1e-2):
+    def __init__(self, dim_x=2, dim_z=1, omega=np.pi/4, dt=0.0, sigma_xi=0.1, rho=1e-2, p0=1e5):
         super().__init__(dim_x=dim_x, dim_z=dim_z)
         # set state and dynamics info
         self.x = np.zeros(dim_x)
@@ -15,7 +15,7 @@ class SinusoidalKalmanFilter(KalmanFilter):
 
         # set filter transition matrices
         self.F = sinusoidal_f_matrix(omega, dt)
-        self.P = np.eye(dim_x) * 1e5
+        self.P = np.eye(dim_x) * p0
         self.H = h_matrix(dim_x, dim_z)
         self.set_r(rho)
         self.set_q(sigma_xi)

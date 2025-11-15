@@ -42,7 +42,7 @@ class FilterBank:
 
 
 class SinusoidalFilterBank(FilterBank):
-    def __init__(self, dim_x=2, dim_z=1, omegas=None, dt=0.0, sigma_xi=0.1, rho=1e-2):
+    def __init__(self, dim_x=2, dim_z=1, omegas=None, dt=0.0, sigma_xi=0.1, rho=1e-2, p0=None):
         super().__init__(dim_x, dim_z)
         self.filters = []
         self.omegas = omegas
@@ -50,6 +50,9 @@ class SinusoidalFilterBank(FilterBank):
 
         self.sigma_xi = sigma_xi
         self.rho = rho
+        if p0 is None:
+            p0 = 1e-2
+        self.p0 = p0  # general filter covariance
 
         self.build_filter_bank()
 
@@ -60,6 +63,7 @@ class SinusoidalFilterBank(FilterBank):
         sigma_xi = self.sigma_xi
         rho = self.rho
         dim_x, dim_z = self.dim_x, self.dim_z
+        p0 = self.p0
 
         # create the kalman filters for the bank
         for o, s, r in zip(omegas, sigma_xi, rho):
@@ -68,7 +72,8 @@ class SinusoidalFilterBank(FilterBank):
                                          omega=o,
                                          dt=dt,
                                          sigma_xi=s,
-                                         rho=r)
+                                         rho=r,
+                                         p0=p0)
             self.filters.append(skf)
         self.N = self.__len__()
 

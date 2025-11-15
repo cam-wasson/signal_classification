@@ -210,6 +210,7 @@ class ANOVAContext:
     label_arr: np.array
     filter_dict: dict
     dt: float
+    omegas: np.array
 
 
 def anova_loss(context: ANOVAContext):
@@ -220,18 +221,21 @@ def anova_loss(context: ANOVAContext):
     phis = context.filter_dict['phi']
     dt = context.dt
     label_arr = context.label_arr
+    omegas = context.omegas
 
     # compute tracking feature values
     spread = raw - filter_state[:, 0]
     velocity_filter = filter_state[:, 1]
     velocity_empirical = np.diff(np.concatenate(([0], filter_state[:, 0]))) / dt
     acceleration_empirical = np.diff(np.concatenate(([0], filter_state[:, 1]))) / dt
+    velocity_analytical = np.sum(amps*omegas * np.cos(omegas*dt + phis), axis=1)
+    acceleration_analytical = np.sum(-1*amps*np.square(omegas) * np.sin(omegas*dt + phis), axis=1)
 
     # compute system dynamics feature values
-    amp_dot = np.diff(np.concatenate(([0], amps))) / dt
-    phi_dot = np.diff(np.concatenate(([0], phis))) / dt
-    amp_dot_dot = np.diff(np.concatenate(([0], amp_dot))) / dt
-    phi_dot_dot = np.diff(np.concatenate(([0], phi_dot))) / dt
+    amp_dot = np.diff(np.vstack(([0]*amps.shape[1], amps)), axis=0) / dt
+    phi_dot = np.diff(np.vstack(([0]*amps.shape[1], phis)), axis=0) / dt
+    amp_dot_dot = np.diff(np.vstack(([0]*amp_dot.shape[1], amp_dot)), axis=0) / dt
+    phi_dot_dot = np.diff(np.vstack(([0]*phi_dot.shape[1], phi_dot)), axis=0) / dt
 
     # compute final loss
     total_anova = 0
@@ -245,3 +249,5 @@ def anova_loss(context: ANOVAContext):
     total_anova += anova_1d(phi_dot, label_arr)
     total_anova += anova_1d(amp_dot_dot, label_arr)
     total_anova += anova_1d(phi_dot_dot, label_arr)
+
+    return 1 / total_anova

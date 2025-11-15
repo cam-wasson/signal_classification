@@ -15,7 +15,7 @@ sys.path.append('../kalman_filter_bank')
 sys.path.append('..')
 
 import util
-from kalman_filter_bank import SinusoidalFilterBank, run_filter_bank
+from filter_bank import SinusoidalFilterBank, run_filter_bank
 from Labelling.ExtremaCluster import compute_cluster_dict
 
 muse('Qt5Agg')
@@ -31,6 +31,10 @@ OBJECTIVES = {
     },
     'spread_max': {
         'fn': opt_util.spread_max,
+        'required_keys': ['context'],
+    },
+    'anova_loss': {
+        'fn': opt_util.anova_loss,
         'required_keys': ['context'],
     }
     # add more objectives here
@@ -79,13 +83,13 @@ def pos_mse_precontext(selections, max_freq_fft=2.0, spectrum_thresh=None) -> di
     return {'train': fft_dict_train, 'test': fft_dict_test}
 
 
-def pos_mse_context(pre_context, filter_values):
+def pos_mse_context(pre_ctx, filter_values):
     # instantiate the context data class
     pos_mse_ctx = opt_util.PositionErrorContext
 
     # populate with values
     pos_mse_ctx.filter_state = filter_values
-    pos_mse_ctx.truth_position = pre_context['truth']
+    pos_mse_ctx.truth_position = pre_ctx['truth']
 
     return pos_mse_ctx
 
@@ -95,14 +99,14 @@ def vel_mse_precontext(selections, max_freq_fft=2.0, spectrum_thresh=None):
     return pos_mse_precontext(selections, max_freq_fft, spectrum_thresh=spectrum_thresh)
 
 
-def vel_mse_context(pre_context, filter_values):
+def vel_mse_context(pre_ctx, filter_values):
     # instantiate the context data class
     vel_mse_ctx = opt_util.VelocityErrorContext()
 
     # populate with values
-    vel_mse_ctx.truth_position = pre_context['truth']
+    vel_mse_ctx.truth_position = pre_ctx['truth']
     vel_mse_ctx.filter_state = filter_values
-    vel_mse_ctx.dt = pre_context['dt']
+    vel_mse_ctx.dt = pre_ctx['dt']
 
     return vel_mse_ctx
 
@@ -136,28 +140,49 @@ def spread_max_precontext(selections, max_freq_fft=2.0, cluster_cdf_threshold=.9
     return spread_pre_context
 
 
-def spread_max_context(pre_context, filter_values, dt=None):
+def spread_max_context(pre_ctx, filter_values, dt=None):
     # assign dt value
-    if 'dt' in pre_context.keys() and dt is None:
-        dt = pre_context['dt']
+    # if 'dt' in pre_context.keys() and dt is None:
+    #     dt = pre_context['dt']
 
     # instantiate the context data class
-    spread_max_ctx = opt_util.SpreadMaxContext(measurement=pre_context['raw'],
+    spread_max_ctx = opt_util.SpreadMaxContext(measurement=pre_ctx['raw'],
                                                filter_state=filter_values,
-                                               cluster_dictionary=pre_context['cluster_dict'],
-                                               dt=dt)
+                                               cluster_dictionary=pre_ctx['cluster_dict'])
     return spread_max_ctx
 
 
-def phase_align_context(pre_context, filter_values):
+def anova_precontext(selections, omegas, max_freq_fft=2.0, cluster_cdf_threshold=.9, dt=1/(24*60)):
+    pre_ctx = spread_max_precontext(selections, max_freq_fft, cluster_cdf_threshold, dt)
+    for k in pre_ctx.keys():
+        pre_ctx[k]['omegas'] = omegas
+    return pre_ctx
+
+
+def anova_context(pre_ctx, filter_dict):
     # instantiate the context data class
-    phase_align_ctx = opt_util.PhaseAlignmentContext
+    anova_ctx = opt_util.ANOVAContext
 
     # populate with values
-    return phase_align_ctx
+    anova_ctx.measurement = pre_ctx['raw']
+    anova_ctx.filter_dict = filter_dict
+    anova_ctx.dt = pre_ctx['dt']
+    anova_ctx.omegas = pre_ctx['omegas']
+
+    # convert the cluster dictionary to a label array
+    label_arr = np.zeros_like(pre_ctx['raw'])
+    label_arr[np.concatenate(pre_ctx['cluster_dict']['cluster_min']['x_points'])] = -1
+    label_arr[np.concatenate(pre_ctx['cluster_dict']['cluster_max']['x_points'])] = 1
+    anova_ctx.label_arr = label_arr
+    return anova_ctx
 
 
-def build_objective_precontext(selection, obj_name='pos_mse', max_freq=2.0, spectrum_thresh=None, cluster_cdf=.9):
+def build_objective_precontext(selection,
+                               obj_name='pos_mse',
+                               max_freq=2.0,
+                               spectrum_thresh=None,
+                               cluster_cdf=.9,
+                               omegas=None):
     # build the appropriate data class for the objective function
     if obj_name == 'pos_mse':
         pre_ctx = pos_mse_precontext(selection, max_freq, spectrum_thresh=spectrum_thresh)
@@ -166,24 +191,27 @@ def build_objective_precontext(selection, obj_name='pos_mse', max_freq=2.0, spec
     elif obj_name == 'spread_max':
         pre_ctx = spread_max_precontext(selection, max_freq, cluster_cdf)
     elif obj_name == 'phase_alignment':
-        # pre_ctx = phase_align_precontext(pre_context, filter_values)
-        pre_ctx = None
+        pre_ctx = None  # phase_align_precontext(pre_context, filter_values)
+    elif obj_name == 'anova_loss':
+        pre_ctx = anova_precontext(selection, omegas=omegas, max_freq_fft=max_freq, cluster_cdf_threshold=cluster_cdf)
     else:
         pre_ctx = None
 
     return pre_ctx
 
 
-def build_objective_context(pre_context, filter_values, obj_name):
+def build_objective_context(pre_context, filter_dict, obj_name):
     # build the appropriate data class for the objective function
     if obj_name == 'pos_mse':
-        ctx = pos_mse_context(pre_context, filter_values)
+        ctx = pos_mse_context(pre_context, filter_dict['x'])
     elif obj_name == 'vel_mse':
-        ctx = vel_mse_context(pre_context, filter_values)
+        ctx = vel_mse_context(pre_context, filter_dict['x'])
     elif obj_name == 'spread_max':
-        ctx = spread_max_context(pre_context, filter_values)
+        ctx = spread_max_context(pre_context, filter_dict['x'])
     elif obj_name == 'phase_alignment':
-        ctx = phase_align_context(pre_context, filter_values)
+        ctx = None  # phase_align_context(pre_context, filter_values)
+    elif obj_name == 'anova_loss':
+        ctx = anova_context(pre_context, filter_dict)
     else:
         ctx = None
 
@@ -226,12 +254,12 @@ def train_filter_bank_adam(filter_bank,
         # Compute current losses
         filter_bank.reset_states()
         filter_dict = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
-        obj_ctx = build_objective_context(pre_context_train, filter_dict['x'], objective_name)
+        obj_ctx = build_objective_context(pre_context_train, filter_dict, objective_name)
         train_loss = loss_fn(obj_ctx)
 
         filter_bank.reset_states()
         filter_dict_test = run_filter_bank(filter_bank, pre_context_test['raw'], verbose=False)
-        obj_ctx_test = build_objective_context(pre_context_test, filter_dict_test['x'], objective_name)
+        obj_ctx_test = build_objective_context(pre_context_test, filter_dict_test, objective_name)
         test_loss = loss_fn(obj_ctx_test)
 
         losses[epoch] = [train_loss, test_loss]
@@ -257,7 +285,7 @@ def train_filter_bank_adam(filter_bank,
             filter_dict_plus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
 
             # compute loss for positive perturbation
-            obj_ctx = build_objective_context(pre_context_train, filter_dict_plus['x'], objective_name)
+            obj_ctx = build_objective_context(pre_context_train, filter_dict_plus, objective_name)
             loss_plus = loss_fn(obj_ctx)
 
             # Perturb negatively
@@ -267,7 +295,7 @@ def train_filter_bank_adam(filter_bank,
             filter_dict_minus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
 
             # compute loss for negative perturbation
-            obj_ctx = build_objective_context(pre_context_train, filter_dict_minus['x'], objective_name)
+            obj_ctx = build_objective_context(pre_context_train, filter_dict_minus, objective_name)
             loss_minus = loss_fn(obj_ctx)
 
             # Restore original parameter
@@ -287,7 +315,7 @@ def train_filter_bank_adam(filter_bank,
             filter_dict_plus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
 
             # compute loss for positive perturbation
-            obj_ctx = build_objective_context(pre_context_train, filter_dict_plus['x'], objective_name)
+            obj_ctx = build_objective_context(pre_context_train, filter_dict_plus, objective_name)
             loss_plus = loss_fn(obj_ctx)
 
             # Perturb log space negatively, convert to linear, compute loss
@@ -297,7 +325,7 @@ def train_filter_bank_adam(filter_bank,
             filter_dict_minus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
 
             # compute loss for negative perturbation
-            obj_ctx = build_objective_context(pre_context_train, filter_dict_minus['x'], objective_name)
+            obj_ctx = build_objective_context(pre_context_train, filter_dict_minus, objective_name)
             loss_minus = loss_fn(obj_ctx)
 
             # Restore original linear value of rho
@@ -332,12 +360,12 @@ def train_filter_bank_adam(filter_bank,
     # Final loss reporting
     filter_bank.reset_states()
     filter_dict = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
-    obj_ctx = build_objective_context(pre_context_train, filter_dict['x'], objective_name)
+    obj_ctx = build_objective_context(pre_context_train, filter_dict, objective_name)
     train_loss = loss_fn(obj_ctx)
 
     filter_bank.reset_states()
     filter_dict_test = run_filter_bank(filter_bank, pre_context_test['raw'], verbose=False)
-    obj_ctx_test = build_objective_context(pre_context_test, filter_dict_test['x'], objective_name)
+    obj_ctx_test = build_objective_context(pre_context_test, filter_dict_test, objective_name)
     test_loss = loss_fn(obj_ctx_test)
 
     print(f"\n\nFinal Loss after {n_epochs} epochs: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
@@ -399,7 +427,6 @@ def plot_filter_bank(meas, bank_dict, dt, objective_function, truth_pos=None):
     return figure
 
 
-# @dataclass
 class RunConfig:
     # input items
     train_times: list
@@ -447,30 +474,41 @@ class RunConfig:
     def init_filter_bank_parameters(self):
         self.omega_dict = {'pos_mse': np.array([0.02, 0.66, 2.04, 3.9]),
                            'vel_mse': np.array([0.02, 0.66, 2.04, 3.9]),
-                           'spread_max': np.array([0.02, 0.1, .25, 0.66])}
+                           'spread_max': np.array([0.02, 0.1, .25, 0.66]),
+                           'anova_loss': np.array([0.02, 0.66, 2.04, 3.9])}
         n_omega = len(self.omega_dict[self.objective])
+
+        # R matrix scalar values
         self.rho0_dict = {'pos_mse': [10**(-0.5)]*n_omega,  # replace rho0/sigmaXi0 w/ grid search results
                           'vel_mse': [10**(-0.5)]*n_omega,
-                          'spread_max': 10**np.array([0.46352044,  0.5294198,   0.67744341, -0.19491549])}
+                          'spread_max': 10**np.array([0.46352044,  0.5294198,   0.67744341, -0.19491549]),
+                          'anova_loss': [10**(-0.5)]*n_omega}
+
+        # Q matrix scalar values
         self.sigma_xi0_dict = {'pos_mse': [10**0.5]*n_omega,
                                'vel_mse': [10**0.5]*n_omega,
-                               'spread_max': 10**np.array([-1.10086254, -0.99297798, -0.71250029,  0.87094734])}
+                               'spread_max': 10**np.array([-1.10086254, -0.99297798, -0.71250029,  0.87094734]),
+                               'anova_loss': [10**0.5]*n_omega}
 
     def init_truth_extraction_parameters(self):
         self.fft_max_freq_dict = {'pos_mse': 5,
                                   'vel_mse': 2,
-                                  'spread_max': 5}
+                                  'spread_max': 5,
+                                  'anova_loss': 5}
         self.label_cluster_cdf_thresh_dict = {'pos_mse': .95,
                                               'vel_mse': .95,
-                                              'spread_max': .95}
+                                              'spread_max': .95,
+                                              'anova_loss': .95}
 
     def init_grad_desc_parameters(self):
         self.alpha_dict = {'pos_mse': 2.5e-2,
                            'vel_mse': 5e-2,
-                           'spread_max': 2.5e-2}
+                           'spread_max': 2.5e-2,
+                           'anova_loss': 2.5e-2}
         self.epoch_dict = {'pos_mse': 14,
                            'vel_mse': 12,
-                           'spread_max': 4}
+                           'spread_max': 4,
+                           'anova_loss': 12}
 
     def build_selections(self):
         # build training selection
@@ -533,7 +571,7 @@ if __name__ == "__main__":
     # set initial parameters
     train_selection = [datetime.datetime(2025, 7, 31).timestamp(), datetime.datetime(2025, 8, 10).timestamp() - 1]
     test_selection = [datetime.datetime(2025, 8, 11).timestamp(), datetime.datetime(2025, 8, 12).timestamp() - 1]
-    objective = 'spread_max'
+    objective = 'anova_loss'
     subdir_str = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     save_root = f'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\4_Fall\\CS-591\\training_sessions\\{objective}'
     save_root = f'{save_root}\\{subdir_str}'
@@ -547,6 +585,7 @@ if __name__ == "__main__":
 
     # construct full precontext
     pre_context = build_objective_precontext(selection=run_cfg.data_selections,
+                                             omegas=run_cfg.filter_bank_config['omegas'],
                                              obj_name=run_cfg.objective,
                                              max_freq=run_cfg.truth_extraction_config['max_freq'],
                                              cluster_cdf=run_cfg.truth_extraction_config['cluster_cdf'])
@@ -557,11 +596,13 @@ if __name__ == "__main__":
         f.close()
 
     # Construct the filter bank w/ the following sinusoidal frequencies
+    p0 = 1e-2
     fbank = SinusoidalFilterBank(
         omegas=run_cfg.filter_bank_config['omegas'],
         dt=pre_context['train']['dt'],
         sigma_xi=run_cfg.filter_bank_config['sigma_xi'],
         rho=run_cfg.filter_bank_config['rho'],
+        p0=p0
     )
 
     # Train the filter bank
