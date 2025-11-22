@@ -212,42 +212,49 @@ class ANOVAContext:
     dt: float
     omegas: np.array
 
+    def __init__(self):
+        pass
+
 
 def anova_loss(context: ANOVAContext):
     # extract values
     raw = context.measurement
     filter_state = context.filter_dict['x']
-    amps = context.filter_dict['amp']
-    phis = context.filter_dict['phi']
+    # amps = context.filter_dict['amp']
+    # phis = context.filter_dict['phi']
     dt = context.dt
-    label_arr = context.label_arr
-    omegas = context.omegas
+    label_arr = context.label_arr[context.label_arr != 0]
+    # omegas = context.omegas
 
     # compute tracking feature values
     spread = raw - filter_state[:, 0]
-    velocity_filter = filter_state[:, 1]
+    # velocity_filter = filter_state[:, 1]
     velocity_empirical = np.diff(np.concatenate(([0], filter_state[:, 0]))) / dt
     acceleration_empirical = np.diff(np.concatenate(([0], filter_state[:, 1]))) / dt
-    velocity_analytical = np.sum(amps*omegas * np.cos(omegas*dt + phis), axis=1)
-    acceleration_analytical = np.sum(-1*amps*np.square(omegas) * np.sin(omegas*dt + phis), axis=1)
+    # velocity_analytical = np.sum(amps*omegas * np.cos(omegas*dt + phis), axis=1)
+    # acceleration_analytical = np.sum(-1*amps*np.square(omegas) * np.sin(omegas*dt + phis), axis=1)
 
     # compute system dynamics feature values
-    amp_dot = np.diff(np.vstack(([0]*amps.shape[1], amps)), axis=0) / dt
-    phi_dot = np.diff(np.vstack(([0]*amps.shape[1], phis)), axis=0) / dt
-    amp_dot_dot = np.diff(np.vstack(([0]*amp_dot.shape[1], amp_dot)), axis=0) / dt
-    phi_dot_dot = np.diff(np.vstack(([0]*phi_dot.shape[1], phi_dot)), axis=0) / dt
+    # amp_dot = np.diff(np.vstack(([0]*amps.shape[1], amps)), axis=0) / dt
+    # phi_dot = np.diff(np.vstack(([0]*amps.shape[1], phis)), axis=0) / dt
+    # amp_dot_dot = np.diff(np.vstack(([0]*amp_dot.shape[1], amp_dot)), axis=0) / dt
+    # phi_dot_dot = np.diff(np.vstack(([0]*phi_dot.shape[1], phi_dot)), axis=0) / dt
 
     # compute final loss
     total_anova = 0
 
-    total_anova += anova_1d(spread, label_arr)
-    total_anova += anova_1d(velocity_filter, label_arr)
-    total_anova += anova_1d(velocity_empirical, label_arr)
-    total_anova += anova_1d(acceleration_empirical, label_arr)
+    total_anova += anova_1d(spread[context.label_arr != 0], label_arr)
+    # total_anova += anova_1d(velocity_filter[context.label_arr != 0], label_arr)
+    total_anova += anova_1d(velocity_empirical[context.label_arr != 0], label_arr)
+    total_anova += anova_1d(acceleration_empirical[context.label_arr != 0], label_arr)
 
-    total_anova += anova_1d(amp_dot, label_arr)
-    total_anova += anova_1d(phi_dot, label_arr)
-    total_anova += anova_1d(amp_dot_dot, label_arr)
-    total_anova += anova_1d(phi_dot_dot, label_arr)
+    # total_anova += anova_1d(amp_dot, label_arr)
+    # total_anova += anova_1d(phi_dot, label_arr)
+    # total_anova += anova_1d(amp_dot_dot, label_arr)
+    # total_anova += anova_1d(phi_dot_dot, label_arr)
 
-    return 1 / total_anova
+    # log scale the total ANOVA and
+    if total_anova > 1:
+        return 1 / np.log10(total_anova)
+    else:
+        return 1 / total_anova
