@@ -161,7 +161,7 @@ def anova_precontext(selections, omegas, max_freq_fft=2.0, cluster_cdf_threshold
 
 def anova_context(pre_ctx, filter_dict):
     # instantiate the context data class
-    anova_ctx = opt_util.ANOVAContext
+    anova_ctx = opt_util.ANOVAContext()
 
     # populate with values
     anova_ctx.measurement = pre_ctx['raw']
@@ -427,6 +427,59 @@ def plot_filter_bank(meas, bank_dict, dt, objective_function, truth_pos=None):
     return figure
 
 
+def stationary_hex_plot(raws, filter_dicts, label_arrs, dt):
+    # extract
+    raw_train, raw_test = raws[0], raws[1]
+    filter_dict_train, filter_dict_test = filter_dicts[0], filter_dicts[1]
+    label_arr_train, label_arr_test = label_arrs[0], label_arrs[1]
+    t_train, t_test = np.arange(len(filter_dict_train['x']))*dt, np.arange(len(filter_dict_test['x']))*dt
+    min_idx_train, max_idx_train = (label_arr_train == -1, label_arr_train == 1)
+    min_idx_test, max_idx_test = (label_arr_test == -1, label_arr_test == 1)
+
+    fig, ax = plt.subplots(2, 3, figsize=(10, 8))
+
+    # plot positions
+    ax[0, 0].plot(t_train, raw_train)
+    ax[0, 0].plot(t_train, filter_dict_train['x'][:, 0], color='orange', alpha=.5)
+    ax[0, 0].scatter(t_train[min_idx_train], raw_train[min_idx_train], color='green')
+    ax[0, 0].scatter(t_train[max_idx_train], raw_train[max_idx_train], color='red')
+    ax[0, 0].set_title('Raw Measurement [Train]')
+
+    ax[1, 0].plot(t_test, raw_test)
+    ax[1, 0].plot(t_test, filter_dict_test['x'][:, 0], color='orange', alpha=.5)
+    ax[1, 0].scatter(t_test[min_idx_test], raw_test[min_idx_test], color='green')
+    ax[1, 0].scatter(t_test[max_idx_test], raw_test[max_idx_test], color='red')
+    ax[1, 0].set_title('Raw Measurement [Test]')
+
+    # plot empirical velocity
+    emp_vel_train = np.diff(np.concatenate(([0], filter_dict_train['x'][:, 0]))) / dt
+    emp_vel_test = np.diff(np.concatenate(([0], filter_dict_test['x'][:, 0]))) / dt
+    ax[0, 1].plot(t_train, emp_vel_train)
+    ax[0, 1].plot(t_train, filter_dict_train['x'][:, 1], color='orange', alpha=.5)
+    ax[0, 1].scatter(t_train[min_idx_train], emp_vel_train[min_idx_train], color='green')
+    ax[0, 1].scatter(t_train[max_idx_train], emp_vel_train[max_idx_train], color='red')
+    ax[0, 1].set_title('Empirical Velocity [Train]')
+
+    ax[1, 1].plot(t_test, emp_vel_test)
+    ax[1, 1].plot(t_test, filter_dict_test['x'][:, 1], color='orange', alpha=.5)
+    ax[1, 1].scatter(t_test[min_idx_test], emp_vel_test[min_idx_test], color='green')
+    ax[1, 1].scatter(t_test[max_idx_test], emp_vel_test[max_idx_test], color='red')
+    ax[1, 1].set_title('Empirical Velocity [Test]')
+
+    # plot empirical acceleration
+    emp_acc_train = np.diff(np.concatenate(([0], filter_dict_train['x'][:, 1]))) / dt
+    emp_acc_test = np.diff(np.concatenate(([0], filter_dict_test['x'][:, 1]))) / dt
+    ax[0, 2].plot(t_train, emp_acc_train)
+    ax[0, 2].scatter(t_train[min_idx_train], emp_acc_train[min_idx_train], color='green')
+    ax[0, 2].scatter(t_train[max_idx_train], emp_acc_train[max_idx_train], color='red')
+    ax[0, 2].set_title('Empirical Acceleration [Train]')
+
+    ax[1, 2].plot(t_test, emp_acc_test)
+    ax[1, 2].scatter(t_test[min_idx_test], emp_acc_test[min_idx_test], color='green')
+    ax[1, 2].scatter(t_test[max_idx_test], emp_acc_test[max_idx_test], color='red')
+    ax[1, 2].set_title('Empirical Acceleration [Test]')
+
+
 class RunConfig:
     # input items
     train_times: list
@@ -482,13 +535,13 @@ class RunConfig:
         self.rho0_dict = {'pos_mse': [10**(-0.5)]*n_omega,  # replace rho0/sigmaXi0 w/ grid search results
                           'vel_mse': [10**(-0.5)]*n_omega,
                           'spread_max': 10**np.array([0.46352044,  0.5294198,   0.67744341, -0.19491549]),
-                          'anova_loss': [10**(-0.5)]*n_omega}
+                          'anova_loss': [10**(-0.0)]*n_omega}
 
         # Q matrix scalar values
         self.sigma_xi0_dict = {'pos_mse': [10**0.5]*n_omega,
                                'vel_mse': [10**0.5]*n_omega,
                                'spread_max': 10**np.array([-1.10086254, -0.99297798, -0.71250029,  0.87094734]),
-                               'anova_loss': [10**0.5]*n_omega}
+                               'anova_loss': [10**0.0]*n_omega}
 
     def init_truth_extraction_parameters(self):
         self.fft_max_freq_dict = {'pos_mse': 5,
