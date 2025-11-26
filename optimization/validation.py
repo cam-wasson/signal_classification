@@ -62,8 +62,8 @@ def build_objective_precontext(selection,
         pre_ctx = pos_mse_precontext(selection, max_freq, spectrum_thresh=spectrum_thresh)
     elif obj_name == 'vel_mse':
         pre_ctx = vel_mse_precontext(selection, max_freq)
-    elif obj_name == 'anova_loss':
-        pre_ctx = anova_precontext(selection, omegas=omegas, max_freq_fft=max_freq, cluster_cdf_threshold=cluster_cdf)
+    # elif obj_name == 'anova_loss':
+    #     pre_ctx = anova_precontext(selection, omegas=omegas, max_freq_fft=max_freq, cluster_cdf_threshold=cluster_cdf)
     else:
         pre_ctx = None
 
@@ -77,6 +77,8 @@ def run_validation(filter_bank, selections, objective, truth_extraction_params=N
                                    'cluster_cdf': .9,
                                    'omegas': filter_bank.omegas}
     losses = []
+    filter_outputs = []
+    prectxs = []
     for s in selections:
         start_str, stop_str = (datetime.fromtimestamp(s[0]).strftime("%D"),
                                datetime.fromtimestamp(s[1]).strftime("%D"))
@@ -89,10 +91,12 @@ def run_validation(filter_bank, selections, objective, truth_extraction_params=N
                                              spectrum_thresh=truth_extraction_params['spectrum_thresh'],
                                              cluster_cdf=truth_extraction_params['cluster_cdf'],
                                              omegas=truth_extraction_params['cluster_cdf'])
+        prectxs.append(pre_ctx)
 
         # run the filter bank on this selection
         filter_dict = run_filter_bank(filter_bank, pre_ctx['raw'])
         filter_bank.reset_states()
+        filter_outputs.append(filter_dict)
 
         # compute loss
         ctx = build_objective_context(pre_ctx, filter_dict, objective)
@@ -102,19 +106,48 @@ def run_validation(filter_bank, selections, objective, truth_extraction_params=N
         print(f'\t{objective}: {loss}')
         losses.append(loss)
 
-    return np.mean(losses)
+    plot_estimation(filter_outputs, prectxs, objective)
+
+    return np.mean(losses), filter_outputs
+
+
+def plot_estimation(filter_output, pre_ctxs, obj_str):
+    fig, ax = plt.subplots(2, len(filter_output))
+    fig.suptitle(obj_str)
+
+    for i in range(len(filter_output)):
+        # plot positions
+        t_plot = np.arange(len(pre_ctxs[i]['raw']))*pre_ctxs[i]['dt']
+        ax[0, i].scatter(t_plot, pre_ctxs[i]['raw'], label='meas', s=5, color='k', alpha=.75)
+        ax[0, i].plot(t_plot, filter_output[i]['x'][:, 0], label='filter', linewidth=3)
+        ax[0, i].plot(t_plot, pre_ctxs[i]['truth'], label='truth', alpha=.5)
+        ax[0, i].legend()
+        ax[0, i].set_title('position')
+
+        # plot velocities
+        vel_truth = np.gradient(pre_ctxs[i]['truth']) / pre_ctxs[i]['dt']
+        ax[1, i].plot(t_plot, filter_output[i]['x'][:, 1], label='filter', linewidth=3)
+        ax[1, i].plot(t_plot, vel_truth, alpha=.5, label='truth')
+        ax[1, i].legend()
+        ax[1, i].set_title('velocity')
+
+    return fig
 
 
 if __name__ == '__main__':
     from datetime import datetime
     import pickle
+    import time
 
-    validation_set = [[datetime(2025, 1, 5).timestamp(), datetime(2025, 1, 15).timestamp()],
-                      [datetime(2025, 2, 5).timestamp(), datetime(2025, 2, 15).timestamp()],
-                      [datetime(2025, 3, 5).timestamp(), datetime(2025, 3, 15).timestamp()],
-                      [datetime(2025, 4, 5).timestamp(), datetime(2025, 4, 15).timestamp()],
-                      [datetime(2025, 5, 5).timestamp(), datetime(2025, 5, 15).timestamp()]]
-    objective_func = 'vel_mse'
+    tStart = time.time()
+    # validation_set = [[datetime(2025, 1, 5).timestamp(), datetime(2025, 1, 15).timestamp()],
+    #                   [datetime(2025, 2, 5).timestamp(), datetime(2025, 2, 15).timestamp()],
+    #                   [datetime(2025, 3, 5).timestamp(), datetime(2025, 3, 15).timestamp()],
+    #                   [datetime(2025, 4, 5).timestamp(), datetime(2025, 4, 15).timestamp()],
+    #                   [datetime(2025, 5, 5).timestamp(), datetime(2025, 5, 15).timestamp()]]
+    validation_set = [[datetime(2025, 7, 31).timestamp(), datetime(2025, 8, 10).timestamp() - 1],
+                      [datetime(2025, 8, 11).timestamp(), datetime(2025, 8, 12).timestamp() - 1]]
+    objective_func = 'pos_mse'
     training_timestamps = {'pos_mse': '2025-11-09_19-13-25',
                            'vel_mse': '2025-11-08_19-28-14'}
     bank_root = 'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\4_Fall\\CS-591\\training_sessions'
@@ -122,5 +155,11 @@ if __name__ == '__main__':
     skfb = pickle.load(open(bank_path, 'rb'))
     skfb.reset_states()
 
-    mean_loss = run_validation(skfb, validation_set, objective_func)
+    truth_extraction = {'max_freq': 5.0,
+                        'spectrum_thresh': None,
+                        'cluster_cdf': .9,
+                        'omegas': skfb.omegas}
+
+    mean_loss, filter_dicts = run_validation(skfb, validation_set, objective_func, truth_extraction)
     print(f'Mean Loss [{objective_func}]: {mean_loss}')
+    print(f'\n{time.time() - tStart} seconds')

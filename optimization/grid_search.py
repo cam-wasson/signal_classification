@@ -220,7 +220,6 @@ def grid_search(precontexts: dict, Q_range: np.ndarray, R_range: np.ndarray, ome
             i += 1
 
     # Looping through grid
-
     if n_workers is None:
         n_workers = cpu_count() - 1
 
@@ -253,8 +252,8 @@ def run_grid_search(objective_name, Q_range, R_range, n_workers=None) -> pd.Data
 
 
 if __name__ == "__main__":
-    Q_range = np.arange(-1.0, 1.5, 0.5)
-    R_range = np.arange(-1.0, 1.5, 0.5)
+    Q_range = np.array([-0.5, 0.0, 0.5, 1.0])
+    R_range = np.array([-1.0, -0.5, 0.0, 0.5])
 
-    results_df = run_grid_search("pos_mse", Q_range, R_range)
+    results_df = run_grid_search("pos_mse", Q_range, R_range, n_workers=11)
     print(results_df.head())

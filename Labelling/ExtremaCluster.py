@@ -229,13 +229,13 @@ if __name__ == '__main__':
 
     path = 'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\4_Fall\\CS-591\\signal_classification\\data\\btc_1m.csv'
     df = pd.read_csv(path)
-    idx = (df.Date == df.Date.unique()[0]) | (df.Date == df.Date.unique()[1]) | (df.Date == df.Date.unique()[2])
-    raw = df.Open.values[idx]
+    # idx = (df.Date == df.Date.unique()[0]) | (df.Date == df.Date.unique()[1]) | (df.Date == df.Date.unique()[2])
+    raw = df.Open.values  # [idx]
     rate = (raw - raw[0]) / raw[0]
 
     # run clustering
-    # pad_len = util.compute_pad_length(raw)
-    # raw_pad, pad_bounds = util.pad_signal(raw, pad_len)
+    pad_len = util.compute_pad_length(rate)
+    raw_pad, pad_bounds = util.pad_signal(rate, pad_len)
     cluster_dict = compute_cluster_dict(rate, fft_cutoff=2.5, dt=1/(24*60), cdf_thresh=.95)
     label_arr = np.zeros_like(rate)
     label_arr[np.concatenate(cluster_dict['cluster_min']['x_points'])] = -1
