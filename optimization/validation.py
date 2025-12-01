@@ -8,11 +8,15 @@ import util
 import sys
 sys.path.append('../kalman_filter_bank')
 from filter_bank import run_filter_bank
+from Labelling.ExtremaCluster import compute_cluster_dict
 
 mpluse('Qt5Agg')
 
+# BANK_ROOT = 'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\4_Fall\\CS-591\\training_sessions'
+BANK_ROOT = 'C:\\Users\\cwass\\Desktop\\Drexel\\Capstone\\training_sessions'
+dt = 1/(24*60)
 
-def pos_mse_precontext(time_bounds, max_freq_fft=2.0, spectrum_thresh=None) -> dict:
+def pos_mse_precontext(time_bounds, max_freq_fft=2.0, spectrum_thresh=None, cluster_cdf_threshold=0.9) -> dict:
 
     # connect to DB
     conn = util.connect('btc', db_root='../data')
@@ -43,6 +47,8 @@ def pos_mse_precontext(time_bounds, max_freq_fft=2.0, spectrum_thresh=None) -> d
     # store everything important
     fft_dict_train['raw'] = z
     fft_dict_train['dt'] = dt
+    
+    fft_dict_train['cluster_dict'] = compute_cluster_dict(z, max_freq_fft, cluster_cdf_threshold, dt)
 
     return fft_dict_train
 
@@ -66,7 +72,7 @@ def build_objective_precontext(selection,
     #     pre_ctx = anova_precontext(selection, omegas=omegas, max_freq_fft=max_freq, cluster_cdf_threshold=cluster_cdf)
     else:
         pre_ctx = None
-
+    print(pre_ctx.keys())
     return pre_ctx
 
 
@@ -106,7 +112,9 @@ def run_validation(filter_bank, selections, objective, truth_extraction_params=N
         print(f'\t{objective}: {loss}')
         losses.append(loss)
 
-    plot_estimation(filter_outputs, prectxs, objective)
+    # fig = plot_estimation(filter_outputs, prectxs, objective)
+    fig = plot_feature_space(filter_outputs, prectxs, objective)
+    # fig.savefig(f'{BANK_ROOT}\\{objective}_estimation_quadplot.png')
 
     return np.mean(losses), filter_outputs
 
@@ -132,6 +140,73 @@ def plot_estimation(filter_output, pre_ctxs, obj_str):
         ax[1, i].set_title('velocity')
 
     return fig
+    
+    
+def plot_feature_space(filter_output_sets, pre_contexts, objective):
+    n_features = 4  # spread, emp vel, emp acc, amp vel, phi vel
+    n_sets = len(filter_output_sets)
+    fig, ax = plt.subplots(n_sets, n_features)
+    fig.suptitle(objective)
+    
+    for s_idx in range(len(filter_output_sets)):
+        # extract info for plotting
+        filter_x = filter_output_sets[s_idx]['x']
+        amps = filter_output_sets[s_idx]['amp']
+        phis = filter_output_sets[s_idx]['phi']
+        cluster_dict = pre_contexts[s_idx]['cluster_dict']
+        z = pre_contexts[s_idx]['raw']
+        t_plot = np.arange(z.shape[0]) * dt
+        
+        # construct the label array from the cluster dictionary
+        max_idx = np.concatenate(cluster_dict['cluster_max']['x_points'])
+        min_idx = np.concatenate(cluster_dict['cluster_min']['x_points'])
+        label_arr = np.zeros_like(z)
+        label_arr[max_idx] = 1
+        label_arr[min_idx] = -1
+        combined_anova = 0
+        
+        # plot spread
+        spread = z - filter_x[:, 0]
+        ax[s_idx, 0].scatter(t_plot, spread, color='k', alpha=.5, s=3)
+        ax[s_idx, 0].scatter(t_plot[min_idx], spread[min_idx], color='green', s=3)
+        ax[s_idx, 0].scatter(t_plot[max_idx], spread[max_idx], color='red', s=3)
+        ax[s_idx, 0].set_title('spread')
+        combined_anova += optimization_util.anova_1d(spread, label_arr)
+        
+        # plot empirical velocity
+        emp_vel = np.diff(np.concatenate(([0], filter_x[:,0]))) / dt
+        ax[s_idx, 1].scatter(t_plot, emp_vel, color='k', alpha=.5, s=3)
+        ax[s_idx, 1].scatter(t_plot[min_idx], emp_vel[min_idx], color='green', s=3)
+        ax[s_idx, 1].scatter(t_plot[max_idx], emp_vel[max_idx], color='red', s=3)
+        ax[s_idx, 1].set_title('empirical vel')
+        combined_anova += optimization_util.anova_1d(emp_vel, label_arr)
+        
+        # plot empirical acceleration
+        emp_acc = np.diff(np.concatenate(([0], filter_x[:,1]))) / dt
+        ax[s_idx, 2].scatter(t_plot, emp_acc, color='k', alpha=.5, s=3)
+        ax[s_idx, 2].scatter(t_plot[min_idx], emp_acc[min_idx], color='green', s=3)
+        ax[s_idx, 2].scatter(t_plot[max_idx], emp_acc[max_idx], color='red', s=3)
+        ax[s_idx, 2].set_title('empirical acc')
+        combined_anova += optimization_util.anova_1d(emp_acc, label_arr)
+        
+        # plot amplitude velocity
+        amp_vel = np.tanh(np.diff(np.vstack((np.zeros(amps.shape[1]), amps)), axis=0) / dt)[:, 0].reshape(-1, 1)
+        t_repeat = np.repeat(t_plot.reshape(-1, 1), amp_vel.shape[1], axis=1)
+        ax[s_idx, 3].scatter(t_repeat, amp_vel, color='k', alpha=.5, s=3)
+        ax[s_idx, 3].scatter(t_repeat[min_idx], amp_vel[min_idx], color='green', s=3)
+        ax[s_idx, 3].scatter(t_repeat[max_idx], amp_vel[max_idx], color='red', s=3)
+        ax[s_idx, 3].set_title('amp vel (tanh scaled)')
+        combined_anova += optimization_util.anova_1d(amp_vel, label_arr)
+        
+        # plot phase velocity
+        # phi_vel = np.tanh(np.diff(np.vstack((np.zeros(phis.shape[1]), phis)), axis=0) / dt)[:, 0].reshape(-1, 1)
+        # ax[s_idx, 4].scatter(t_repeat, phi_vel, color='k', alpha=.5, s=3)
+        # ax[s_idx, 4].scatter(t_repeat[min_idx], phi_vel[min_idx], color='green', s=3)
+        # ax[s_idx, 4].scatter(t_repeat[max_idx], phi_vel[max_idx], color='red', s=3)
+        # ax[s_idx, 4].set_title('phi vel (tanh scaled)')
+        print(f'Set {s_idx} Combined ANOVA: {combined_anova}')
+        
+    plt.show(block=True)
 
 
 if __name__ == '__main__':
@@ -147,11 +222,10 @@ if __name__ == '__main__':
     #                   [datetime(2025, 5, 5).timestamp(), datetime(2025, 5, 15).timestamp()]]
     validation_set = [[datetime(2025, 7, 31).timestamp(), datetime(2025, 8, 10).timestamp() - 1],
                       [datetime(2025, 8, 11).timestamp(), datetime(2025, 8, 12).timestamp() - 1]]
-    objective_func = 'pos_mse'
+    objective_func = 'vel_mse'
     training_timestamps = {'pos_mse': '2025-11-09_19-13-25',
                            'vel_mse': '2025-11-08_19-28-14'}
-    bank_root = 'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\4_Fall\\CS-591\\training_sessions'
-    bank_path = f'{bank_root}\\{objective_func}\\{training_timestamps[objective_func]}\\filter_bank.pkl'
+    bank_path = f'{BANK_ROOT}\\{objective_func}\\{training_timestamps[objective_func]}\\filter_bank.pkl'
     skfb = pickle.load(open(bank_path, 'rb'))
     skfb.reset_states()
 

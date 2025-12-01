@@ -30,7 +30,7 @@ def anova_1d(values, labels):
 
     # compute F score
     f_score = (ss_between / dof_between) / (ss_within / dof_within)
-    return f_score
+    return f_score / len(labels)
 
 
 @dataclass
