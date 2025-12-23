@@ -1,4 +1,4 @@
-from filter_closed_form_backprop import build_objective_context, OBJECTIVES
+from filter_bank_gradient_descent import build_objective_context, OBJECTIVES
 import matplotlib.pyplot as plt
 from matplotlib import use as mpluse
 import numpy as np
@@ -12,9 +12,10 @@ from Labelling.ExtremaCluster import compute_cluster_dict
 
 mpluse('Qt5Agg')
 
-# BANK_ROOT = 'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\4_Fall\\CS-591\\training_sessions'
-BANK_ROOT = 'C:\\Users\\cwass\\Desktop\\Drexel\\Capstone\\training_sessions'
+BANK_ROOT = 'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\4_Fall\\CS-591\\training_sessions'
+# BANK_ROOT = 'C:\\Users\\cwass\\Desktop\\Drexel\\Capstone\\training_sessions'
 dt = 1/(24*60)
+
 
 def pos_mse_precontext(time_bounds, max_freq_fft=2.0, spectrum_thresh=None, cluster_cdf_threshold=0.9) -> dict:
 
@@ -182,7 +183,7 @@ def plot_feature_space(filter_output_sets, pre_contexts, objective):
         combined_anova += optimization_util.anova_1d(emp_vel, label_arr)
         
         # plot empirical acceleration
-        emp_acc = np.diff(np.concatenate(([0], filter_x[:,1]))) / dt
+        emp_acc = np.diff(np.concatenate(([0], filter_x[:, 1]))) / dt
         ax[s_idx, 2].scatter(t_plot, emp_acc, color='k', alpha=.5, s=3)
         ax[s_idx, 2].scatter(t_plot[min_idx], emp_acc[min_idx], color='green', s=3)
         ax[s_idx, 2].scatter(t_plot[max_idx], emp_acc[max_idx], color='red', s=3)
@@ -205,7 +206,11 @@ def plot_feature_space(filter_output_sets, pre_contexts, objective):
         # ax[s_idx, 4].scatter(t_repeat[max_idx], phi_vel[max_idx], color='red', s=3)
         # ax[s_idx, 4].set_title('phi vel (tanh scaled)')
         print(f'Set {s_idx} Combined ANOVA: {combined_anova}')
-        
+
+    # compute spread anova
+    # compute emp vel anova
+    # compute emp acc anova
+    # combine anovas
     plt.show(block=True)
 
 

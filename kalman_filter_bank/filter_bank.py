@@ -77,7 +77,7 @@ class SinusoidalFilterBank(FilterBank):
             self.filters.append(skf)
         self.N = self.__len__()
 
-    def step(self, residual):
+    def step(self, residual, style='cascade'):
         x_preds = []
         p_preds = []
         for i, f in enumerate(self.filters):
@@ -89,7 +89,8 @@ class SinusoidalFilterBank(FilterBank):
             f.update(meas)
 
             # recompute the residual
-            residual -= f.x[0]
+            if style == 'cascade':
+                residual -= f.x[0]
 
             # store
             x_preds.append(f.x.copy())

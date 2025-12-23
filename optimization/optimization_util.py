@@ -33,10 +33,83 @@ def anova_1d(values, labels):
     return f_score / len(labels)
 
 
+def smooth_mse(y, yhat):
+    # compute overall accuracy
+    mse = np.mean(np.square(np.abs(y - yhat)))
+
+    # compute smoothness of the filter estimates
+    sigma_vel = np.var(np.diff(yhat))
+
+    # compute metrics
+    smooth_loss = mse + sigma_vel
+    return smooth_loss
+
+
+def smooth_mse_grad(y, y_hat, eps=1e-8):
+    """
+    Gradient of:
+        L = MSE(y, y_hat) + lambda_s * std(diff(y_hat))
+
+    Args
+    ----
+    y : (T,) array_like
+        Ground truth signal.
+    y_hat : (T,) array_like
+        Current estimate / prediction.
+    eps : float, optional
+        Small constant to avoid division by zero.
+
+    Returns
+    -------
+    grad : (T,) np.ndarray
+        dL / d y_hat
+    """
+    y = np.asarray(y, dtype=float)
+    y_hat = np.asarray(y_hat, dtype=float)
+    assert y.shape == y_hat.shape
+    T = y_hat.shape[0]
+
+    # --- 1. MSE gradient: (2/T) * (y_hat - y)
+    grad = (2.0 / T) * (y_hat - y)
+
+    # --- 2. Smoothness term: std of first differences
+    if T > 1:
+        d = np.diff(y_hat)                   # shape (T-1,)
+        mu_d = np.mean(d)
+        var_d = np.mean((d - mu_d) ** 2)
+        s = np.sqrt(var_d + eps)            # std(d) with stabilization
+
+        # ds/dd_k = (d_k - mu_d) / ((T-1) * s)
+        ds_dd = (d - mu_d) / ((T - 1) * s)
+
+        # Chain rule: each y_hat[i] hits up to two d's
+        ds_dy = np.zeros_like(y_hat)
+
+        # i = 0 (first point): only d_0 = y_1 - y_0
+        ds_dy[0] = -ds_dd[0]
+
+        # interior points: i in [1, T-2]
+        # ds/dy_i = ds/dd_{i-1} - ds/dd_i
+        if T > 2:
+            ds_dy[1:-1] = ds_dd[:-1] - ds_dd[1:]
+
+        # i = T-1 (last point): only d_{T-2} = y_{T-1} - y_{T-2}
+        ds_dy[-1] = ds_dd[-1]
+
+        grad += ds_dy
+
+    return grad
+
+
 @dataclass
 class PositionErrorContext:
     filter_state: np.array
     truth_position: np.array
+
+
+def pos_mse_grad(context: PositionErrorContext) -> float:
+    # wrap the "smooth mse" gradient w/ position information
+    return smooth_mse_grad(context.filter_state[:, 0], context.truth_position)
 
 
 def position_error(
@@ -85,11 +158,18 @@ class VelocityErrorContext:
     truth_velocity: None
     dt: float
 
-    def __init__(self, filter_state=np.array([]), truth_position=np.array([]), truth_velocity=None, dt=0.0):
+    def __init__(self, filter_state=np.array([]), truth_position=np.array([]), truth_velocity=None, dt=1/(24*60)):
         self.filter_state = filter_state
         self.truth_position = truth_position
-        self.truth_velocity = truth_velocity
         self.dt = dt
+        if truth_velocity is None:
+            truth_velocity = np.gradient(truth_position) / dt
+        self.truth_velocity = truth_velocity
+
+
+def vel_mse_grad(context: VelocityErrorContext) -> float:
+    # wrap the "smooth mse" gradient w/ position information
+    return smooth_mse_grad(context.filter_state[:, 1], context.truth_velocity)
 
 
 def velocity_error(
@@ -223,7 +303,7 @@ def anova_loss(context: ANOVAContext):
     # amps = context.filter_dict['amp']
     # phis = context.filter_dict['phi']
     dt = context.dt
-    label_arr = context.label_arr[context.label_arr != 0]
+    label_arr = np.abs(context.label_arr)
     # omegas = context.omegas
 
     # compute tracking feature values
@@ -243,10 +323,10 @@ def anova_loss(context: ANOVAContext):
     # compute final loss
     total_anova = 0
 
-    total_anova += anova_1d(spread[context.label_arr != 0], label_arr)
+    total_anova += anova_1d(spread, label_arr)
     # total_anova += anova_1d(velocity_filter[context.label_arr != 0], label_arr)
-    total_anova += anova_1d(velocity_empirical[context.label_arr != 0], label_arr)
-    total_anova += anova_1d(acceleration_empirical[context.label_arr != 0], label_arr)
+    total_anova += anova_1d(velocity_empirical, label_arr)
+    total_anova += anova_1d(acceleration_empirical, label_arr)
 
     # total_anova += anova_1d(amp_dot, label_arr)
     # total_anova += anova_1d(phi_dot, label_arr)

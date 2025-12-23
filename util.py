@@ -143,7 +143,7 @@ def extract_low_pass_components_cdf_thresh(signal, dt, cdf_thresh=.95):
     idx = (amps > amp_thresh)
 
     # compute the clean signal
-    clean_signal = np.real(np.fft.ifft(fft_vals * idx))
+    clean_signal = c
 
     # compute omega, amplitude, and phase
     omegas = 2 * np.pi * freqs[idx]
@@ -160,6 +160,28 @@ def extract_low_pass_components_cdf_thresh(signal, dt, cdf_thresh=.95):
         'fhat_real': np.real(fft_vals),
         'fhat_imag': np.imag(fft_vals),
     }
+
+
+def extract_component_reconstructions(signal, dt, max_freq=2.0, pad=False):
+    if pad:
+        signal = pad_signal(signal, L=compute_pad_length(signal))
+
+    # extract the FFT
+    freqs = np.fft.fftfreq(len(signal), d=dt)
+    fft_vals = np.fft.fft(signal)
+
+    # iterate over frequency terms
+    component_dict = {}
+    for f in freqs[freqs > 0]:
+        # exit when at the cap
+        if f > max_freq:
+            break
+
+        # isolate this frequency; reconstruct
+        f_idx = (np.abs(freqs) == f)
+        clean_iso = np.real(np.fft.ifft(fft_vals * f_idx))
+        component_dict[f] = clean_iso
+    return component_dict
 
 
 def compute_cdf(values, bins=1000):
@@ -209,5 +231,4 @@ def fetch_price_space(conn, selection):
     for c in cols[1:]:
         df[c] = df[c].astype("float64")
     return df
-
 

@@ -1,6 +1,6 @@
 import itertools
 import optimization_util as opt_util
-from filter_closed_form_backprop import build_objective_context
+from filter_bank_gradient_descent import build_objective_context
 from util import extract_low_pass_components
 from kalman_filter_bank.filter_bank import SinusoidalFilterBank, run_filter_bank
 from pathlib import Path

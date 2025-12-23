@@ -40,6 +40,17 @@ OBJECTIVES = {
     # add more objectives here
 }
 
+GRADIENTS = {
+    'pos_mse': {
+        'fn': opt_util.pos_mse_grad,
+        'required_keys': ['context']
+    },
+    'vel_mse': {
+        'fn': opt_util.vel_mse_grad,
+        'required_keys': ['context']
+    }
+}
+
 
 def pos_mse_precontext(selections, max_freq_fft=2.0, spectrum_thresh=None) -> dict:
 
@@ -218,16 +229,16 @@ def build_objective_context(pre_context, filter_dict, obj_name):
     return ctx
 
 
-def train_filter_bank_adam(filter_bank,
-                           data: dict,
-                           objective_name: str,
-                           n_epochs: int = 10,
-                           autograd_epsilon=1e-4,
-                           alpha=1e-2,  # learning rate
-                           beta1=.9,  # bias factor 1
-                           beta2=.999,  # bias factor 2
-                           eps=1e-8,
-                           reset_cov=True):
+def train_filter_bank_adam_autograd(filter_bank,
+                                    data: dict,
+                                    objective_name: str,
+                                    n_epochs: int = 10,
+                                    autograd_epsilon=1e-4,
+                                    alpha=1e-2,  # learning rate
+                                    beta1=.9,  # bias factor 1
+                                    beta2=.999,  # bias factor 2
+                                    eps=1e-8,
+                                    reset_cov=True):
 
     # fetch the chosen objective definition
     obj_entry = OBJECTIVES[objective_name]
@@ -350,12 +361,12 @@ def train_filter_bank_adam(filter_bank,
         r_log -= alpha * m_r_hat / (np.sqrt(v_r_hat) + eps)
 
         # Update the filter bank matrices; reset state
-        for i, f in enumerate(filter_bank.filters):
-            f.set_q(10**q_log[i])
-            f.set_r(10**r_log[i])
-            f.x = np.zeros_like(f.x)
+        for i, fil in enumerate(filter_bank.filters):
+            fil.set_q(10**q_log[i])
+            fil.set_r(10**r_log[i])
+            fil.x = np.zeros_like(fil.x)
             if reset_cov:
-                f.P *= 1e5
+                fil.P *= 1e5
 
     # Final loss reporting
     filter_bank.reset_states()
@@ -383,6 +394,339 @@ def train_filter_bank_adam(filter_bank,
     plt.clf()
 
     return filter_bank, q_log, r_log
+
+
+def kf_single_forward_parallel(kf, z):
+    """
+    Run one SKF over a sequence of measurements using your FilterPy-based object,
+    cache everything needed for backprop. This assumes PARALLEL filter estimation,
+    NOT cascading filter estimation.
+
+    Parameters
+    ----------
+    kf : your KalmanFilter child instance
+    z : list/array of measurements (each scalar or shape (1,1))
+
+    Returns
+    -------
+    cache : dict with all per-timestep quantities needed for backprop
+    """
+    # F, H, Q, R, x0, P0):
+    N = len(z)
+    dim_x = kf.dim_x
+
+    cache = {
+        "x_prior": np.zeros((N, dim_x)),
+        "P_prior": np.zeros((N, dim_x, dim_x)),
+        "x_post": np.zeros((N, dim_x)),
+        "P_post": np.zeros((N, dim_x, dim_x)),
+        "z": np.zeros(N),  # scalar innovation
+        "S": np.zeros((N, kf.dim_z, kf.dim_z)),
+        "K": np.zeros((N, dim_x, kf.dim_z)),
+        "F": kf.F.copy(),
+        "H": kf.H.copy(),
+        "Q": kf.Q.copy(),
+        "R": kf.R.copy(),
+        "N": N,
+    }
+
+    for n in range(N):
+        # Prediction, store
+        kf.predict()
+        cache['x_prior'][n] = kf.x_prior.copy()
+        cache['P_prior'][n] = kf.P_prior.copy()
+
+        # Forward update
+        kf.update(z[n])
+
+        # Cache posterior and update-related quantities
+        cache["x_post"][n] = kf.x_post.copy()
+        cache["P_post"][n] = kf.P_post.copy()
+        cache["z"][n] = kf.y.copy()  # residual
+        cache["S"][n] = kf.S.copy()
+        cache["K"][n] = kf.K.copy()
+
+    return cache
+
+
+def kf_bank_forward(kf_bank, z):
+    caches = []
+
+    for kf in kf_bank.filters:
+        # Run this SKF independently on the same measurement sequence
+        cache_k = kf_single_forward_parallel(kf, z)
+        caches.append(cache_k)
+
+    return {
+        "caches": caches,
+        "N_filters": len(kf_bank.filters),
+    }
+
+
+def kf_single_backward(cache, loss_fn, target_signal):
+    """
+    Backpropagation for ONE Kalman Filter (parallel architecture).
+
+    Inputs
+    ------
+    cache : dict
+        Returned by kf_single_forward(kf, z).
+    smooth_mse_grad : callable(x_post) -> gradient w.r.t x_post
+
+    Returns
+    -------
+    dQ : ndarray (dim_x, dim_x)
+    dR : float or (1,1)
+
+    Notes
+    -----
+    This function performs the adjoint sweep *only for ONE filter*.
+    The filter bank wrapper will call this once per filter.
+    """
+
+    F = cache["F"]
+    H = cache["H"]
+    Q = cache["Q"]
+    R = cache["R"]
+    T = cache["N"]
+
+    x_prior = cache["x_prior"]  # (T, dim_x, 1)
+    P_prior = cache["P_prior"]  # (T, dim_x, dim_x)
+    x_post = cache["x_post"]  # (T, dim_x, 1)
+    P_post = cache["P_post"]  # (T, dim_x, dim_x)
+    z_list = cache["z"]  # (T,)
+    S_list = cache["S"]  # (T,1,1)
+    K_list = cache["K"]  # (T,dim_x,1)
+
+    dim_x = F.shape[0]
+
+    # Allocate adjoint variables
+    Gx_post = [np.zeros((dim_x, 1)) for _ in range(T + 1)]
+    Gp_post = [np.zeros((dim_x, dim_x)) for _ in range(T + 1)]
+    Gx_prior = [np.zeros((dim_x, 1)) for _ in range(T + 1)]
+    Gp_prior = [np.zeros((dim_x, dim_x)) for _ in range(T + 1)]
+
+    Gy = [0.0 for _ in range(T + 1)]  # scalar
+    GS = [0.0 for _ in range(T + 1)]  # scalar
+    GS_inv = [0.0 for _ in range(T + 1)]  # scalar
+    GK = [np.zeros((dim_x, 1)) for _ in range(T + 1)]
+
+    dQ = np.zeros_like(Q)
+    dR = 0.0
+
+    # Inject loss gradient at each time step
+    # for t in range(T):
+    #     Gx_post[t + 1] += smooth_mse_grad(x_post[t])  # +1 offset for adjoint sweep
+    Gx_post[1:] = loss_fn(x_post, target_signal)
+
+    # Backward sweep: t = T-1 down to 0
+    for t in reversed(range(T)):
+        n = t + 1  # adjoint index
+
+        x_p = x_prior[t]
+        P_p = P_prior[t]
+        x_f = x_post[t]
+        P_f = P_post[t]
+        z = float(z_list[t])
+        S = float(S_list[t])
+        K = K_list[t]
+
+        # --- Step 8: P_f = (I - K H) P_p ---
+        I = np.eye(dim_x)
+        A = I - K @ H  # (dim_x,dim_x)
+
+        A_bar = Gp_post[n] @ P_p.T  # adjoint through P_f -> A
+        Gp_prior[n] += A.T @ Gp_post[n]
+        GK[n] += -A_bar @ H.T
+
+        # --- Step 7: x_f = x_p + K z ---
+        Gx_prior[n] += Gx_post[n]
+        GK[n] += Gx_post[n] * z
+        Gy[n] += float(K.T @ Gx_post[n])
+
+        # --- Step 6: K = P_p H^T S_inv ---
+        S_inv = 1.0 / S
+        u = P_p @ H.T  # (dim_x,1)
+
+        Gp_prior[n] += (S_inv * GK[n]) @ H
+        GS_inv[n] += float(u.T @ GK[n])
+
+        # --- Step 5: S_inv = 1/S ---
+        GS[n] += -GS_inv[n] * (1.0 / (S ** 2))
+
+        # --- Step 4: S = H P_p H^T + R ---
+        Gp_prior[n] += GS[n] * (H.T @ H)
+        dR += GS[n]
+
+        # --- Step 3: z = measurement - H x_p ---
+        Gx_prior[n] += - H.T * Gy[n]
+
+        # --- Step 2: P_p = F P_prev F^T + Q ---
+        Gp_prev = F.T @ Gp_prior[n] @ F
+        dQ += Gp_prior[n]
+
+        # --- Step 1: x_p = F x_prev ---
+        Gx_prev = F.T @ Gx_prior[n]
+
+        # Propagate to next earlier time
+        Gx_post[n - 1] += Gx_prev
+        Gp_post[n - 1] += Gp_prev
+
+    return dQ, dR
+
+
+def kf_bank_backward(bank_cache, loss_fn, target_signal):
+    """
+    Backpropagation for an entire PARALLEL Kalman Filter Bank.
+
+    Inputs
+    ------
+    bank_cache : dict
+        Output of kf_bank_forward(). Contains list bank_cache["caches"].
+    smooth_mse_grad : callable
+
+    Returns
+    -------
+    dQ_list : list of ndarrays
+        One gradient dQ per filter.
+    dR_list : list of floats
+        One gradient dR per filter.
+
+    Notes
+    -----
+    - Each filter is treated independently.
+    - No cross-filter gradients exist under the parallel architecture.
+    - This method does not assume any shared parameters.
+    - This method is a simple wrapper around kf_single_backward().
+    """
+
+    caches = bank_cache["caches"]
+    M = bank_cache["N_filters"]
+
+    dQ_list = []
+    dR_list = []
+
+    for i in range(M):
+        cache_i = caches[i]
+        dQ_i, dR_i = kf_single_backward(cache_i, smooth_mse_grad)
+        dQ_list.append(dQ_i)
+        dR_list.append(dR_i)
+
+    return dQ_list, dR_list
+
+
+def train_filter_bank_grad(filter_bank,
+                           data: dict,
+                           objective_name: str,
+                           n_epochs: int = 10,
+                           alpha=1e-2,  # learning rate
+                           beta1=.9,  # bias factor 1
+                           beta2=.999,  # bias factor 2
+                           eps=1e-8,
+                           reset_cov=True):
+
+    # fetch the chosen objective definition
+    loss_fn = OBJECTIVES[objective_name]['fn']
+    grad_fn = GRADIENTS[objective_name]['fn']
+    n_filters = len(filter_bank.filters)
+
+    # Initialize exponent parameters and moments
+    q_linear = filter_bank.sigma_xi.copy()
+    q_log = np.log10(q_linear)
+    r_linear = filter_bank.rho.copy()
+    r_log = np.log10(r_linear)
+    m_q = np.zeros_like(q_log)
+    v_q = np.zeros_like(q_log)
+    m_r = np.zeros_like(r_log)
+    v_r = np.zeros_like(r_log)
+    losses = np.zeros((n_epochs, 2))
+
+    pre_context_train = data['train']
+    pre_context_test = data['test']
+
+    # Initialize gradient arrays
+    grad_q = np.zeros_like(filter_bank.sigma_xi, dtype=float)
+    grad_r = np.zeros_like(filter_bank.sigma_xi, dtype=float)
+
+    # begin training
+    tStart = time.time()
+    for epoch in range(n_epochs):
+
+        # Compute current losses
+        filter_bank.reset_states()
+        bank_cache = kf_bank_forward(filter_bank, pre_context_train['raw'])
+        grad = kf_bank_backprop()
+        # filter_dict = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
+        # obj_ctx = build_objective_context(pre_context_train, filter_dict, objective_name)
+        train_loss = 0  # loss_fn(obj_ctx)
+
+        filter_bank.reset_states()
+        filter_dict_test = run_filter_bank(filter_bank, pre_context_test['raw'], verbose=False)
+        obj_ctx_test = build_objective_context(pre_context_test, filter_dict_test, objective_name)
+        test_loss = loss_fn(obj_ctx_test)
+
+        losses[epoch] = [train_loss, test_loss]
+        print(f"Epoch {epoch}/{n_epochs}, Loss: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
+        print(f'\tQ Scalars: {q_log}')
+        print(f'\tR Scalars: {r_log}')
+
+        print(f'\nTraining filters...')
+        for i in range(n_filters):
+            print(f'\tAdjusting filter {i+1}/{n_filters}')
+
+            # Perturb positively, run filter bank
+            filter_bank.reset_states()
+            q_linear[i] = 10**(orig_value + autograd_epsilon)
+            filter_bank.filters[i].set_q(q_linear[i])
+            filter_dict_plus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
+
+            # compute loss for positive perturbation
+            obj_ctx = build_objective_context(pre_context_train, filter_dict_plus, objective_name)
+            loss_plus = loss_fn(obj_ctx)
+
+            grad_q[i] = grad_fn()
+            grad_r[i] = grad_fn()
+
+        # Update biased moments for Q exponents
+        m_q = beta1 * m_q + (1 - beta1) * grad_q
+        v_q = beta2 * v_q + (1 - beta2) * (grad_q ** 2)
+        # Bias-corrected moments
+        m_q_hat = m_q / (1 - beta1 ** (epoch+1))
+        v_q_hat = v_q / (1 - beta2 ** (epoch+1))
+        # Parameter update
+        q_log -= alpha * m_q_hat / (np.sqrt(v_q_hat) + eps)
+
+        # Repeat for R exponents
+        m_r = beta1 * m_r + (1 - beta1) * grad_r
+        v_r = beta2 * v_r + (1 - beta2) * (grad_r ** 2)
+        m_r_hat = m_r / (1 - beta1 ** (epoch+1))
+        v_r_hat = v_r / (1 - beta2 ** (epoch+1))
+        r_log -= alpha * m_r_hat / (np.sqrt(v_r_hat) + eps)
+
+        # Update the filter bank matrices; reset state
+        for i, fil in enumerate(filter_bank.filters):
+            fil.set_q(10**q_log[i])
+            fil.set_r(10**r_log[i])
+            fil.x = np.zeros_like(fil.x)
+            if reset_cov:
+                fil.P *= 1e5
+
+    # Final loss reporting
+    filter_bank.reset_states()
+    filter_dict = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
+    obj_ctx = build_objective_context(pre_context_train, filter_dict, objective_name)
+    train_loss = loss_fn(obj_ctx)
+
+    filter_bank.reset_states()
+    filter_dict_test = run_filter_bank(filter_bank, pre_context_test['raw'], verbose=False)
+    obj_ctx_test = build_objective_context(pre_context_test, filter_dict_test, objective_name)
+    test_loss = loss_fn(obj_ctx_test)
+
+    print(f"\n\nFinal Loss after {n_epochs} epochs: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
+    # Display the optimised noise parameters
+    print(f'Fitted Q Exponents: {q_log}')
+    print(f'Fitted R Exponents: {r_log}')
+    print(f'Run Time: {(time.time() - tStart)/60} mins')
 
 
 def plot_filter_bank(meas, bank_dict, dt, objective_function, truth_pos=None):
@@ -624,9 +968,10 @@ if __name__ == "__main__":
     # set initial parameters
     train_selection = [datetime.datetime(2025, 7, 31).timestamp(), datetime.datetime(2025, 8, 10).timestamp() - 1]
     test_selection = [datetime.datetime(2025, 8, 11).timestamp(), datetime.datetime(2025, 8, 12).timestamp() - 1]
-    objective = 'anova_loss'
+    objective = 'pos_mse'
     subdir_str = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    save_root = f'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\4_Fall\\CS-591\\training_sessions\\{objective}'
+    # save_root = f'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\4_Fall\\CS-591\\training_sessions\\{objective}'
+    save_root = f'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2026\\Capstone 2\\training_sessions\\{objective}'
     save_root = f'{save_root}\\{subdir_str}'
     os.makedirs(save_root)
 
@@ -650,21 +995,36 @@ if __name__ == "__main__":
 
     # Construct the filter bank w/ the following sinusoidal frequencies
     p0 = 1e-2
-    fbank = SinusoidalFilterBank(
-        omegas=run_cfg.filter_bank_config['omegas'],
-        dt=pre_context['train']['dt'],
-        sigma_xi=run_cfg.filter_bank_config['sigma_xi'],
-        rho=run_cfg.filter_bank_config['rho'],
-        p0=p0
-    )
+    # fbank = SinusoidalFilterBank(
+    #     omegas=run_cfg.filter_bank_config['omegas'],
+    #     dt=pre_context['train']['dt'],
+    #     sigma_xi=run_cfg.filter_bank_config['sigma_xi'],
+    #     rho=run_cfg.filter_bank_config['rho'],
+    #     p0=p0
+    # )
+    per_omega_extract = util.extract_component_reconstructions(pre_context['train']['raw'],
+                                                               pre_context['train']['dt'],
+                                                               max_freq=2)
+    omegas = np.array(list(per_omega_extract.keys()))
+    fbank = SinusoidalFilterBank(omegas=omegas,
+                                 dt=pre_context['train']['dt'],
+                                 sigma_xi=[10**0.0]*len(omegas),
+                                 rho=[10**0.0]*len(omegas),
+                                 p0=p0*len(omegas))
 
     # Train the filter bank
-    trained_filter_bank, q_log_final, r_log_final = train_filter_bank_adam(filter_bank=fbank,
-                                                                           data=pre_context,
-                                                                           objective_name=objective,
-                                                                           n_epochs=run_cfg.grad_desc_config['epoch'],
-                                                                           alpha=run_cfg.grad_desc_config['alpha'],
-                                                                           reset_cov=False)
+    # trained_filter_bank, q_log_final, r_log_final = train_filter_bank_adam(filter_bank=fbank,
+    #                                                                        data=pre_context,
+    #                                                                        objective_name=objective,
+    #                                                                        n_epochs=run_cfg.grad_desc_config['epoch'],
+    #                                                                        alpha=run_cfg.grad_desc_config['alpha'],
+    #                                                                        reset_cov=False)
+    train_filter_bank_grad(filter_bank=fbank,
+                           data=pre_context,
+                           objective_name=objective,
+                           n_epochs=run_cfg.grad_desc_config['epoch'],
+                           alpha=run_cfg.grad_desc_config['alpha'],
+                           reset_cov=False)
     with open(f'{save_root}\\{objective}_shot_notes.txt', 'a') as f:
         f.write(f'\n\nFinal Q (log10): {q_log_final}\n')
         f.write(f'Final R (log10): {r_log_final}')
