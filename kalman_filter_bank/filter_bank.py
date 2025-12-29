@@ -5,6 +5,9 @@ from kalman_filter_bank.kalman_filter import SinusoidalKalmanFilter
 from util import pad_signal, extract_low_pass_components
 
 
+import numpy as np
+
+
 class FilterBank:
     def __init__(self, dim_x, dim_z):
         self.dim_x = dim_x
@@ -16,21 +19,45 @@ class FilterBank:
     def build_filter_bank(self):
         pass
 
-    def step(self, meas):
-        pass
+    # ------------------------------------------------------------------
+    # Core shared execution loop (semantic-free)
+    # ------------------------------------------------------------------
+    def _run_filters(self, meas, update_residual):
+        """
+        Shared internal loop for running filters.
+        Residual semantics are injected via update_residual.
+        """
+        x_preds = []
+        p_preds = []
 
+        residual = meas
+
+        for f in self.filters:
+            z = np.array([residual]).reshape(f.z.shape)
+
+            f.predict()
+            f.update(z)
+
+            residual = update_residual(residual, f)
+
+            x_preds.append(f.x.copy())
+            p_preds.append(f.P.copy())
+
+        return residual, x_preds, p_preds
+
+    # ------------------------------------------------------------------
+    # Utility accessors
+    # ------------------------------------------------------------------
     def amplitudes(self):
-        """Iterate over filters to return estimated amplitudes"""
         amps = np.zeros(len(self.filters))
-        for f_idx in range(len(self.filters)):
-            amps[f_idx] = self.filters[f_idx].amplitude()
+        for i, f in enumerate(self.filters):
+            amps[i] = f.amplitude()
         return amps
 
     def phases(self):
-        """Iterate over filters to return estimated phases"""
         phase = np.zeros(len(self.filters))
-        for f_idx in range(len(self.filters)):
-            phase[f_idx] = self.filters[f_idx].phase()
+        for i, f in enumerate(self.filters):
+            phase[i] = f.phase()
         return phase
 
     def reset_states(self):
@@ -41,66 +68,94 @@ class FilterBank:
         return len(self.filters)
 
 
+# ----------------------------------------------------------------------
+# Residual semantics (the ONLY difference between tracking & discrimination)
+# ----------------------------------------------------------------------
+def cascade_residual(residual, f):
+    return residual - f.x[0]
+
+
+def parallel_residual(residual, f):
+    return residual
+
+
+# ----------------------------------------------------------------------
+# Sinusoidal Filter Bank
+# ----------------------------------------------------------------------
 class SinusoidalFilterBank(FilterBank):
-    def __init__(self, dim_x=2, dim_z=1, omegas=None, dt=0.0, sigma_xi=0.1, rho=1e-2, p0=None):
+    def __init__(
+        self,
+        dim_x=2,
+        dim_z=1,
+        omegas=None,
+        dt=0.0,
+        sigma_xi=0.1,
+        rho=1e-2,
+        p0=None,
+    ):
         super().__init__(dim_x, dim_z)
+
         self.filters = []
         self.omegas = omegas
         self.dt = dt
-
         self.sigma_xi = sigma_xi
         self.rho = rho
+
         if p0 is None:
             p0 = 1e-2
-        self.p0 = p0  # general filter covariance
+        self.p0 = p0
 
         self.build_filter_bank()
 
     def build_filter_bank(self):
-        # extract object vars as local vars
-        omegas = self.omegas
-        dt = self.dt
-        sigma_xi = self.sigma_xi
-        rho = self.rho
-        dim_x, dim_z = self.dim_x, self.dim_z
-        p0 = self.p0
-
-        # create the kalman filters for the bank
-        for o, s, r in zip(omegas, sigma_xi, rho):
-            skf = SinusoidalKalmanFilter(dim_x=dim_x,
-                                         dim_z=dim_z,
-                                         omega=o,
-                                         dt=dt,
-                                         sigma_xi=s,
-                                         rho=r,
-                                         p0=p0)
+        for o, s, r in zip(self.omegas, self.sigma_xi, self.rho):
+            skf = SinusoidalKalmanFilter(
+                dim_x=self.dim_x,
+                dim_z=self.dim_z,
+                omega=o,
+                dt=self.dt,
+                sigma_xi=s,
+                rho=r,
+                p0=self.p0,
+            )
             self.filters.append(skf)
+
         self.N = self.__len__()
 
-    def step(self, residual, style='cascade'):
-        x_preds = []
-        p_preds = []
-        for i, f in enumerate(self.filters):
-            # format the residual value into a measurement
-            meas = np.array([residual]).reshape(f.z.shape)
+    # ------------------------------------------------------------------
+    # TRACKING FILTER (cascading, stationary signal generator)
+    # ------------------------------------------------------------------
+    def step_tracking(self, meas):
+        """
+        Cascading filter bank.
+        Produces a stationary residual.
+        """
+        residual, x_preds, p_preds = self._run_filters(
+            meas,
+            update_residual=cascade_residual,
+        )
 
-            # run the kf
-            f.predict()
-            f.update(meas)
-
-            # recompute the residual
-            if style == 'cascade':
-                residual -= f.x[0]
-
-            # store
-            x_preds.append(f.x.copy())
-            p_preds.append(f.P.copy())
-
-        # fuse filter states and covariance
+        # Optional: retain aggregate state if you still want it
         x_sum = np.sum(np.array(x_preds), axis=0)
         P_sum = np.sum(np.stack(p_preds, axis=0), axis=0)
 
-        return x_sum, P_sum, np.ones_like(self.omegas)
+        return residual, x_sum, P_sum
+
+    # ------------------------------------------------------------------
+    # DISCRIMINATION FILTER (parallel, state-producing)
+    # ------------------------------------------------------------------
+    def step_discrimination(self, meas):
+        """
+        Parallel filter bank.
+        Produces per-filter states for datamining / learning.
+        """
+        _, x_preds, p_preds = self._run_filters(
+            meas,
+            update_residual=parallel_residual,
+        )
+
+        return np.array(x_preds), np.array(p_preds)
+
 
 
 class SinusoidalCMMEAFilterBank(SinusoidalFilterBank):
