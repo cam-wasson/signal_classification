@@ -157,6 +157,56 @@ class SinusoidalFilterBank(FilterBank):
         return np.array(x_preds), np.array(p_preds)
 
 
+class NarrowbandTrackingFilterBank(SinusoidalFilterBank):
+    DEFAULT_OMEGAS = np.array([0.1, 0.17, 0.26], dtype=float)
+
+    def __init__(
+        self,
+        dim_x=2,
+        dim_z=1,
+        dt=0.0,
+        sigma_xi=0.1,
+        rho=1e-2,
+        p0=None,
+        omegas=None,
+    ):
+        if omegas is None:
+            omegas_arr = self.DEFAULT_OMEGAS.copy()
+        else:
+            omegas_arr = np.array(omegas, dtype=float)
+
+        n = len(omegas_arr)
+
+        # Ensures sigma_xi and rho are iterable arrays of length n.
+        if np.isscalar(sigma_xi):
+            sigma_xi_arr = np.full(n, float(sigma_xi), dtype=float)
+        else:
+            sigma_xi_arr = np.array(sigma_xi, dtype=float)
+            if sigma_xi_arr.shape[0] != n:
+                raise ValueError(
+                    f"sigma_xi must have length {n}, got {sigma_xi_arr.shape[0]}")
+        if np.isscalar(rho):
+            rho_arr = np.full(n, float(rho), dtype=float)
+        else:
+            rho_arr = np.array(rho, dtype=float)
+            if rho_arr.shape[0] != n:
+                raise ValueError(
+                    f"rho must have length {n}, got {rho_arr.shape[0]}")
+
+        super().__init__(
+            dim_x=dim_x,
+            dim_z=dim_z,
+            omegas=omegas_arr,
+            dt=dt,
+            sigma_xi=sigma_xi_arr,
+            rho=rho_arr,
+            p0=p0,
+        )
+
+    def step(self, z):
+        _, x_sum, P_sum = self.step_tracking(z)
+        return x_sum, P_sum
+
 
 class SinusoidalCMMEAFilterBank(SinusoidalFilterBank):
     def __init__(self, dim_x=2, dim_z=1, omegas=None, dt=0.0, sigma_xi=0.1, rho=1e-2):
@@ -206,7 +256,8 @@ class SinusoidalCMMEAFilterBank(SinusoidalFilterBank):
         self.weights = numerators / np.sum(numerators)
 
         # Fuse state estimates
-        x_fused = np.sum([w * x for w, x in zip(self.weights, x_preds)], axis=0)
+        x_fused = np.sum(
+            [w * x for w, x in zip(self.weights, x_preds)], axis=0)
 
         # Fuse covariances
         P_fused = sum([
@@ -255,7 +306,8 @@ def create_sig_dict(price_df, random_date=True):
     else:
         date = '2022-04-07'  # Good Dates: 2022-04-07, 2022-08-24, 2022-07-15
     date_df = price_df.loc[price_df.Date == date]
-    rate_signal = (date_df['Open'].values - date_df['Open'].values[0]) / date_df['Open'].values[0]
+    rate_signal = (date_df['Open'].values -
+                   date_df['Open'].values[0]) / date_df['Open'].values[0]
 
     # pad signal, compute omegas
     padded_signal, true_bounds = pad_signal(rate_signal)
@@ -289,7 +341,8 @@ def main(price_df):
     #                       38.1899857, 42.96373391,  47.73748212,  52.51123033,  57.28497854, 62.05872675])
     sig_dict['omega'] = omega_arr  # np.concatenate((omega_arr, omega_arr*-1))
     sig_dict['dt'] = n_days / len(price_df)
-    sig_dict['raw'] = (price_df.Open.values - price_df.Open.values[0]) / price_df.Open.values[0]
+    sig_dict['raw'] = (price_df.Open.values -
+                       price_df.Open.values[0]) / price_df.Open.values[0]
     sig_dict['t'] = np.arange(price_df.shape[0])
 
     # build the CMMEA
@@ -297,29 +350,35 @@ def main(price_df):
                                       dim_z=1,
                                       omegas=sig_dict['omega'],
                                       dt=sig_dict['dt'],
-                                      sigma_xi=[1e1]*len(omega_arr),  # model confidence
-                                      rho=[1e-4]*len(omega_arr))  # noise confidence (1e-5 baseline)
+                                      # model confidence
+                                      sigma_xi=[1e1]*len(omega_arr),
+                                      # noise confidence (1e-5 baseline)
+                                      rho=[1e-4]*len(omega_arr))
 
     # run the CMMEA
     cmmea_dict = run_filter_bank(cmmea, sig_dict['raw'])
 
     # plot the results
     plt.figure(figsize=(10, 8))
-    plt.title(f'Price Estimation {price_df.Date.values[0]} : {price_df.Date.values[-1]}')
+    plt.title(
+        f'Price Estimation {price_df.Date.values[0]} : {price_df.Date.values[-1]}')
     plt.xlabel('Time')
     plt.ylabel('Percent Change')
     plt.scatter(sig_dict['t'], sig_dict['raw'], color='red', s=3)
-    plt.plot(sig_dict['t'], cmmea_dict['x'][:, 0], color='k', label='CMMEA Filter')
+    plt.plot(sig_dict['t'], cmmea_dict['x'][:, 0],
+             color='k', label='CMMEA Filter')
 
     plt.figure(figsize=(10, 8))
     plt.title('Spread')
     plt.xlabel('Time')
     plt.ylabel('Spread')
-    plt.scatter(sig_dict['t'], sig_dict['raw'] - cmmea_dict['x'][:, 0], color='k', s=3)
+    plt.scatter(sig_dict['t'], sig_dict['raw'] -
+                cmmea_dict['x'][:, 0], color='k', s=3)
 
     plt.figure(figsize=(10, 8))
     plt.title('Velocity Estimation')
-    plt.plot(sig_dict['t'], cmmea_dict['x'][:, 1], color='k', label='CMMEA Filter')
+    plt.plot(sig_dict['t'], cmmea_dict['x'][:, 1],
+             color='k', label='CMMEA Filter')
 
     plt.figure()
     plt.title('CMMEA Weights')
