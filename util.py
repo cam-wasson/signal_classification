@@ -5,7 +5,10 @@ import sqlite3
 from dataclasses import dataclass
 
 
-def pad_signal(sig, L=512):
+def pad_signal(sig, L=None):
+    if L is None:
+        L = compute_pad_length(sig)
+
     # determine sizes of the pads
     N = sig.shape[0]
     pad_total = L - N
@@ -172,7 +175,7 @@ def extract_component_reconstructions(signal, dt, max_freq=2.0, pad=False):
 
     # iterate over frequency terms
     component_dict = {}
-    for f in freqs[freqs > 0]:
+    for f in freqs[freqs >= 0]:
         # exit when at the cap
         if f > max_freq:
             break

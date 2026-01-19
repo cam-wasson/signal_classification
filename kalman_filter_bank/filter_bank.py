@@ -87,10 +87,10 @@ class SinusoidalFilterBank(FilterBank):
         self,
         dim_x=2,
         dim_z=1,
-        omegas=None,
-        dt=0.0,
-        sigma_xi=0.1,
-        rho=1e-2,
+        omegas=np.array([0.1]),
+        dt=1/(24*60),
+        sigma_xi=np.array([1e1]),
+        rho=np.array([1e-1]),
         p0=None,
     ):
         super().__init__(dim_x, dim_z)
@@ -98,8 +98,8 @@ class SinusoidalFilterBank(FilterBank):
         self.filters = []
         self.omegas = omegas
         self.dt = dt
-        self.sigma_xi = sigma_xi
-        self.rho = rho
+        self.sigma_xi = np.array(sigma_xi)
+        self.rho = np.array(rho)
 
         if p0 is None:
             p0 = 1e-2
@@ -121,6 +121,44 @@ class SinusoidalFilterBank(FilterBank):
             self.filters.append(skf)
 
         self.N = self.__len__()
+
+    def set_q(self, sigma_xi):
+        self.sigma_xi = sigma_xi
+        for i, f in enumerate(self.filters):
+            f.set_q(sigma_xi[i])
+
+    def set_r(self, rho):
+        self.rho = rho
+        for i, f in enumerate(self.filters):
+            f.set_r(rho[i])
+
+    def reset_cov(self):
+        for i, f in enumerate(self.filters):
+            f.set_p(self.p0)
+
+    def step(self, residual):
+        x_preds = []
+        p_preds = []
+        for i, f in enumerate(self.filters):
+            # format the residual value into a measurement
+            meas = np.array([residual]).reshape(f.z.shape)
+
+            # run the kf
+            f.predict()
+            f.update(meas)
+
+            # recompute the residual
+            residual -= f.x[0]
+
+            # store
+            x_preds.append(f.x.copy())
+            p_preds.append(f.P.copy())
+
+        # fuse filter states and covariance
+        x_sum = np.sum(np.array(x_preds), axis=0)
+        P_sum = np.sum(np.stack(p_preds, axis=0), axis=0)
+
+        return x_sum, P_sum, np.ones_like(self.omegas)
 
     # ------------------------------------------------------------------
     # TRACKING FILTER (cascading, stationary signal generator)

@@ -70,7 +70,7 @@ def smooth_mse_grad(y, y_hat, eps=1e-8):
     T = y_hat.shape[0]
 
     # --- 1. MSE gradient: (2/T) * (y_hat - y)
-    grad = (2.0 / T) * (y_hat - y)
+    grad = 2.0 * (y_hat - y)
 
     # --- 2. Smoothness term: std of first differences
     if T > 1:
@@ -101,15 +101,26 @@ def smooth_mse_grad(y, y_hat, eps=1e-8):
     return grad
 
 
+def discrim_smooth_mse(cache, comp_dict):
+    aggregate_mse = 0
+    for i, k in enumerate(comp_dict.keys()):
+        aggregate_mse += np.mean(np.square(comp_dict[k] - cache[i]['x_post'][:, 0]))
+    return aggregate_mse
+
+
 @dataclass
 class PositionErrorContext:
     filter_state: np.array
     truth_position: np.array
 
 
-def pos_mse_grad(context: PositionErrorContext) -> float:
-    # wrap the "smooth mse" gradient w/ position information
-    return smooth_mse_grad(context.filter_state[:, 0], context.truth_position)
+# def pos_mse_grad(context: PositionErrorContext) -> float:
+#     # wrap the "smooth mse" gradient w/ position information
+#     return smooth_mse_grad(context.filter_state[:, 0], context.truth_position)
+
+
+def pos_mse_grad(filter_state: np.array, truth_position: np.array):
+    return smooth_mse_grad(filter_state[:, 0], truth_position)
 
 
 def position_error(

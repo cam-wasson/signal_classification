@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pprint
 import time
+from tqdm import tqdm
 
 import optimization_util as opt_util
 
@@ -36,6 +37,10 @@ OBJECTIVES = {
     'anova_loss': {
         'fn': opt_util.anova_loss,
         'required_keys': ['context'],
+    },
+    'discrim_mse': {
+        'fn': opt_util.position_error,
+        'required_keys': ['context']
     }
     # add more objectives here
 }
@@ -48,8 +53,69 @@ GRADIENTS = {
     'vel_mse': {
         'fn': opt_util.vel_mse_grad,
         'required_keys': ['context']
+    },
+    'discrim_mse': {
+        'fn': opt_util.pos_mse_grad,
+        'required_keys': ['context']
     }
 }
+
+
+def discrim_mse_precontext(selections, max_freq_fft=2.0, dt=1/(24*60), tracker=None) -> dict:
+    # connect to db
+    conn = util.connect('btc', db_root='../data')
+
+    # build the pre context for each selection
+    pre_ctx = {}
+    mu, sigma = 0, 10**-8
+    for i, sk in enumerate(selections):
+        pre_ctx[sk] = {}
+        # fetch this selection; rate scale
+        price_df = util.fetch_price_space(conn=conn, selection=selections[sk])
+        rate_arr = (price_df.Open.values - price_df.Open.values[0]) / price_df.Open.values[0]
+
+        # stabilize the signal via tracker
+        stationary_signal = np.zeros_like(rate_arr)
+        if tracker is None:
+            # if no tracker, remove the narrowband lowpass components
+            rate_pad, pad_idx = util.pad_signal(rate_arr, L=util.compute_pad_length(rate_arr))
+            nb_fft_dict = util.extract_low_pass_components(rate_pad, dt=dt, max_freq=0.3)
+            stationary_signal = (rate_pad - nb_fft_dict['truth'])[pad_idx[0]: pad_idx[1]]
+        else:
+            # run the tracker on the rates
+            # extract the stationary signal from the tracker
+            pass
+
+        # fit z-scale parameters
+        if i == 0:
+            mu = np.mean(stationary_signal)
+            sigma = np.std(stationary_signal)
+
+        # extract truth data from the stationary signal
+        # stationary_pad, pad_idx = util.pad_signal(stationary_signal, L=util.compute_pad_length(stationary_signal))
+        # scaled_stationary_signal = (stationary_signal - mu) / sigma
+        comp_dict = util.extract_component_reconstructions(stationary_signal, dt, max_freq_fft)
+
+        # remove padding from each component's reconstruction
+        clean_signal = np.zeros_like(stationary_signal)
+        comp_dict_clean = dict()
+        for j, ck in enumerate(comp_dict.keys()):
+            # skip 0
+            if (ck > -1e-8) and (ck < 1e-8):
+                continue
+            # strip pad, add to reconstructed signal
+            comp_dict_clean[np.round(ck, 1)] = comp_dict[ck]  # [pad_idx[0]: pad_idx[1]]
+            clean_signal += comp_dict_clean[np.round(ck, 1)]
+
+        # store in dictionary
+        pre_ctx[sk]['rate'] = rate_arr
+        pre_ctx[sk]['raw'] = stationary_signal
+        pre_ctx[sk]['truth'] = clean_signal
+        pre_ctx[sk]['dt'] = dt
+        pre_ctx[sk]['comp_dict'] = comp_dict_clean
+        pre_ctx[sk]['zscale_mu'] = mu
+        pre_ctx[sk]['zscale_sigma'] = sigma
+    return pre_ctx
 
 
 def pos_mse_precontext(selections, max_freq_fft=2.0, spectrum_thresh=None) -> dict:
@@ -188,12 +254,25 @@ def anova_context(pre_ctx, filter_dict):
     return anova_ctx
 
 
-def build_objective_precontext(selection,
-                               obj_name='pos_mse',
-                               max_freq=2.0,
-                               spectrum_thresh=None,
-                               cluster_cdf=.9,
-                               omegas=None):
+def discrim_mse_context(pre_ctx, filter_dicts):
+    '''
+        Arguments:
+            pre_ctx: pre-context of the training pipeline. holds truth info and other useful things
+            filter_dicts: list of forward prop dictionaries containing parallel filter bank estimates
+    '''
+
+    return 0
+
+
+def build_objective_precontext(run_config,
+                               spectrum_thresh=None):
+    # extract key info from the run config
+    selection = run_config.data_selections
+    omega_band = run_config.filter_bank_config['omegas']
+    obj_name = run_config.objective
+    max_freq = run_config.truth_extraction_config['max_freq']
+    cluster_cdf = run_config.truth_extraction_config['cluster_cdf']
+
     # build the appropriate data class for the objective function
     if obj_name == 'pos_mse':
         pre_ctx = pos_mse_precontext(selection, max_freq, spectrum_thresh=spectrum_thresh)
@@ -204,7 +283,12 @@ def build_objective_precontext(selection,
     elif obj_name == 'phase_alignment':
         pre_ctx = None  # phase_align_precontext(pre_context, filter_values)
     elif obj_name == 'anova_loss':
-        pre_ctx = anova_precontext(selection, omegas=omegas, max_freq_fft=max_freq, cluster_cdf_threshold=cluster_cdf)
+        pre_ctx = anova_precontext(selection,
+                                   omegas=omega_band,
+                                   max_freq_fft=max_freq,
+                                   cluster_cdf_threshold=cluster_cdf)
+    elif obj_name == 'discrim_mse':
+        pre_ctx = discrim_mse_precontext(selection, max_freq, tracker=run_config.tracker)
     else:
         pre_ctx = None
 
@@ -213,7 +297,7 @@ def build_objective_precontext(selection,
 
 def build_objective_context(pre_context, filter_dict, obj_name):
     # build the appropriate data class for the objective function
-    if obj_name == 'pos_mse':
+    if (obj_name == 'pos_mse') or (obj_name == 'discrim_mse'):
         ctx = pos_mse_context(pre_context, filter_dict['x'])
     elif obj_name == 'vel_mse':
         ctx = vel_mse_context(pre_context, filter_dict['x'])
@@ -223,6 +307,8 @@ def build_objective_context(pre_context, filter_dict, obj_name):
         ctx = None  # phase_align_context(pre_context, filter_values)
     elif obj_name == 'anova_loss':
         ctx = anova_context(pre_context, filter_dict)
+    elif obj_name == 'discrim_mse':
+        ctx = discrim_mse_context(pre_context, filter_dict)
     else:
         ctx = None
 
@@ -396,7 +482,7 @@ def train_filter_bank_adam_autograd(filter_bank,
     return filter_bank, q_log, r_log
 
 
-def kf_single_forward_parallel(kf, z):
+def kf_single_forward(kf, z):
     """
     Run one SKF over a sequence of measurements using your FilterPy-based object,
     cache everything needed for backprop. This assumes PARALLEL filter estimation,
@@ -406,6 +492,7 @@ def kf_single_forward_parallel(kf, z):
     ----------
     kf : your KalmanFilter child instance
     z : list/array of measurements (each scalar or shape (1,1))
+    step: a string indicating parallel or cascading filter
 
     Returns
     -------
@@ -442,140 +529,337 @@ def kf_single_forward_parallel(kf, z):
         # Cache posterior and update-related quantities
         cache["x_post"][n] = kf.x_post.copy()
         cache["P_post"][n] = kf.P_post.copy()
-        cache["z"][n] = kf.y.copy()  # residual
-        cache["S"][n] = kf.S.copy()
-        cache["K"][n] = kf.K.copy()
+        cache["z"][n] = z[n]  # residual
+        cache["S"][n] = np.array(kf.S)
+        cache["K"][n] = np.array(kf.K)
 
     return cache
 
 
-def kf_bank_forward(kf_bank, z):
-    caches = []
+def kf_single_forward_iae(
+    kf,
+    z,
+    adapt="R",            # "R", "Q", or "both"
+    alpha_ema=0.05,       # EMA smoothing for NIS
+    eta_R=0.02,           # adaptation rate for R scale
+    eta_Q=0.005,          # adaptation rate for Q scale (usually slower)
+    R_bounds=(1e-3, 1e3), # bounds on scalar beta
+    Q_bounds=(1e-6, 1e6), # bounds on scalar alpha
+    use_ema_for_update=True,
+):
+    """
+    Forward pass with Innovation-based Adaptive Estimation (IAE) scalar scaling:
+      R_k = beta_k * R0
+      Q_k = alpha_k * Q0
 
-    for kf in kf_bank.filters:
-        # Run this SKF independently on the same measurement sequence
-        cache_k = kf_single_forward_parallel(kf, z)
-        caches.append(cache_k)
+    Uses NIS = y^T S^{-1} y, optionally smoothed with EMA, to drive log(beta), log(alpha).
+    """
 
-    return {
-        "caches": caches,
-        "N_filters": len(kf_bank.filters),
+    N = len(z)
+    dim_x = kf.dim_x
+    dim_z = kf.dim_z
+
+    # Baselines (kept fixed; we scale these each step)
+    Q0 = kf.Q.copy()
+    R0 = kf.R.copy()
+
+    cache = {
+        "x_prior": np.zeros((N, dim_x)),
+        "P_prior": np.zeros((N, dim_x, dim_x)),
+        "x_post": np.zeros((N, dim_x)),
+        "P_post": np.zeros((N, dim_x, dim_x)),
+        'z': z,
+
+        # Store actual measurement and innovation separately
+        "meas": np.zeros((N, dim_z)) if dim_z > 1 else np.zeros(N),
+        "innov": np.zeros((N, dim_z)) if dim_z > 1 else np.zeros(N),
+
+        "S": np.zeros((N, dim_z, dim_z)),
+        "K": np.zeros((N, dim_x, dim_z)),
+
+        # IAE diagnostics
+        "nis": np.zeros(N),
+        "nis_ema": np.zeros(N),
+        "R_scale": np.zeros(N),
+        "Q_scale": np.zeros(N),
+
+        # Static matrices
+        "F": kf.F.copy(),
+        "H": kf.H.copy(),
+        "Q0": Q0.copy(),
+        "R0": R0.copy(),
+        "N": N,
     }
 
+    # Target mean of NIS is dim_z (for consistent KF)
+    nis_target = float(dim_z)
 
-def kf_single_backward(cache, loss_fn, target_signal):
+    # Log-scales (log-space keeps positivity)
+    log_beta = 0.0   # for R
+    log_alpha = 0.0  # for Q
+
+    nis_ema = nis_target  # initialize “consistent”
+
+    for n in range(N):
+        # ---- Apply current scalings BEFORE predict/update ----
+        beta = float(np.clip(np.exp(log_beta), R_bounds[0], R_bounds[1]))
+        alpha = float(np.clip(np.exp(log_alpha), Q_bounds[0], Q_bounds[1]))
+
+        if adapt in ("R", "both"):
+            kf.R = beta * R0
+        if adapt in ("Q", "both"):
+            kf.Q = alpha * Q0
+
+        cache["R_scale"][n] = beta
+        cache["Q_scale"][n] = alpha
+
+        # ---- Predict ----
+        kf.predict()
+        cache["x_prior"][n] = kf.x_prior.copy()
+        cache["P_prior"][n] = kf.P_prior.copy()
+
+        # ---- Update ----
+        kf.update(z[n])
+
+        # Posterior caches
+        cache["x_post"][n] = kf.x_post.copy()
+        cache["P_post"][n] = kf.P_post.copy()
+        cache["S"][n] = np.array(kf.S)
+        cache["K"][n] = np.array(kf.K)
+
+        # Measurement and innovation
+        # FilterPy stores innovation in kf.y
+        y = np.array(kf.y).reshape(-1)  # shape (dim_z,)
+        cache["innov"][n] = y if dim_z > 1 else float(y[0])
+
+        zn = np.array(z[n]).reshape(-1)
+        cache["meas"][n] = zn if dim_z > 1 else float(zn[0])
+
+        # ---- NIS computation ----
+        S = np.array(kf.S)
+        if dim_z == 1:
+            nis = float((y[0] * y[0]) / (S[0, 0] + 1e-12))
+        else:
+            # Solve S^{-1} y without explicitly inverting
+            nis = float(y.T @ np.linalg.solve(S + 1e-12*np.eye(dim_z), y))
+
+        cache["nis"][n] = nis
+
+        # ---- Smooth NIS (optional, recommended) ----
+        nis_ema = (1.0 - alpha_ema) * nis_ema + alpha_ema * nis
+        cache["nis_ema"][n] = nis_ema
+
+        # ---- Adaptation signal ----
+        drive = (nis_ema if use_ema_for_update else nis) - nis_target
+
+        # ---- Update log-scales (simple, stable, monotone) ----
+        # Interpretation:
+        #  - If NIS > target, residuals too large: increase assumed uncertainty.
+        #    You can choose to push that into R, Q, or both.
+        if adapt in ("R", "both"):
+            log_beta += eta_R * drive
+        if adapt in ("Q", "both"):
+            log_alpha += eta_Q * drive
+
+    return cache
+
+
+def kf_bank_forward(kf_bank, meas, step_type='cascade', adapt='both'):
+    # create a copy of the measurements
+    z = np.array(meas)
+    caches = [None] * len(kf_bank.filters)
+    for i, kf in enumerate(tqdm(kf_bank.filters)):
+        # Run this SKF independently on the same measurement sequence
+        # cache_k = kf_single_forward(kf, z)
+        cache_k = kf_single_forward_iae(kf, z, adapt=adapt)
+        caches[i] = cache_k
+
+        # update residual w/ KF prediction
+        if step_type == 'cascade':
+            z -= cache_k['x_post'][:, 0]
+
+    return caches
+
+
+def kf_single_backward(cache, grad_fn, target_signal):
     """
-    Backpropagation for ONE Kalman Filter (parallel architecture).
+    Backward (adjoint) pass for ONE Kalman Filter operating in PARALLEL mode.
 
-    Inputs
-    ------
+    This function computes gradients of the total loss with respect to
+    the *covariance matrices* Q and R, given a full forward-pass cache.
+
+    IMPORTANT:
+    ----------
+    - This function does NOT know about log-space parameters.
+    - It returns dL/dQ and dL/dR in *linear space*.
+    - Chain-rule mapping to log-space scalars (rho, sigma_xi)
+      must be handled by the training loop.
+
+    Assumptions:
+    ------------
+    - dim_z == 1 (scalar measurement)
+    - loss is applied to x_post at every timestep
+    - cache was produced by kf_single_forward_parallel
+
+    Parameters
+    ----------
     cache : dict
-        Returned by kf_single_forward(kf, z).
-    smooth_mse_grad : callable(x_post) -> gradient w.r.t x_post
+        Forward-pass cache containing:
+        x_prior, P_prior, x_post, P_post, z, S, K, F, H, Q, R, N
+
+    grad_fn : callable
+        grad_fn(x_post, target_signal) -> dL/dx_post
+        Must return array of shape (T, dim_x, 1)
+
+    target_signal : array-like
+        Ground-truth signal or state aligned with x_post
 
     Returns
     -------
-    dQ : ndarray (dim_x, dim_x)
-    dR : float or (1,1)
+    dQ : ndarray, shape (dim_x, dim_x)
+        Gradient of loss with respect to Q
 
-    Notes
-    -----
-    This function performs the adjoint sweep *only for ONE filter*.
-    The filter bank wrapper will call this once per filter.
+    dR : float
+        Gradient of loss with respect to R (scalar, since dim_z == 1)
     """
 
-    F = cache["F"]
-    H = cache["H"]
-    Q = cache["Q"]
-    R = cache["R"]
-    T = cache["N"]
+    # ------------------------------------------------------------------
+    # Unpack cached forward-pass quantities
+    # ------------------------------------------------------------------
+    F = cache["F"]                 # State transition matrix
+    H = cache["H"]                 # Measurement matrix
+    Q = cache["Q0"]                 # Process noise covariance
+    R = cache["R0"]                 # Measurement noise covariance
+    T = cache["N"]                 # Number of timesteps
 
-    x_prior = cache["x_prior"]  # (T, dim_x, 1)
-    P_prior = cache["P_prior"]  # (T, dim_x, dim_x)
-    x_post = cache["x_post"]  # (T, dim_x, 1)
-    P_post = cache["P_post"]  # (T, dim_x, dim_x)
-    z_list = cache["z"]  # (T,)
-    S_list = cache["S"]  # (T,1,1)
-    K_list = cache["K"]  # (T,dim_x,1)
+    x_prior = cache["x_prior"]     # (T, dim_x, 1)
+    P_prior = cache["P_prior"]     # (T, dim_x, dim_x)
+    x_post = cache["x_post"]      # (T, dim_x, 1)
+    P_post = cache["P_post"]      # (T, dim_x, dim_x)
+    z_list = cache["z"]           # (T,) innovation (scalar)
+    S_list = cache["S"]           # (T, 1, 1)
+    K_list = cache["K"]           # (T, dim_x, 1)
 
     dim_x = F.shape[0]
 
-    # Allocate adjoint variables
-    Gx_post = [np.zeros((dim_x, 1)) for _ in range(T + 1)]
-    Gp_post = [np.zeros((dim_x, dim_x)) for _ in range(T + 1)]
-    Gx_prior = [np.zeros((dim_x, 1)) for _ in range(T + 1)]
-    Gp_prior = [np.zeros((dim_x, dim_x)) for _ in range(T + 1)]
+    # ------------------------------------------------------------------
+    # Allocate adjoint (reverse-mode) variables
+    # We use lists indexed from 0..T for clarity in the backward sweep
+    # ------------------------------------------------------------------
+    Gx_post = np.zeros((T + 1, dim_x, 1))
+    Gp_post = np.zeros((T + 1, dim_x, dim_x))
+    Gx_prior = np.zeros((T + 1, dim_x, 1))
+    Gp_prior = np.zeros((T + 1, dim_x, dim_x))
 
-    Gy = [0.0 for _ in range(T + 1)]  # scalar
-    GS = [0.0 for _ in range(T + 1)]  # scalar
-    GS_inv = [0.0 for _ in range(T + 1)]  # scalar
+    # Scalars for measurement-side adjoints (dim_z == 1)
+    Gy = np.zeros(T+1, dtype=float)
+    GS = np.zeros(T+1, dtype=float)
+    GS_inv = np.zeros(T+1, dtype=float)
+
+    # Kalman gain adjoint
     GK = [np.zeros((dim_x, 1)) for _ in range(T + 1)]
 
+    # Accumulators for parameter gradients
     dQ = np.zeros_like(Q)
     dR = 0.0
 
-    # Inject loss gradient at each time step
-    # for t in range(T):
-    #     Gx_post[t + 1] += smooth_mse_grad(x_post[t])  # +1 offset for adjoint sweep
-    Gx_post[1:] = loss_fn(x_post, target_signal)
+    # ------------------------------------------------------------------
+    # Inject loss gradient at each timestep
+    # Loss is applied to x_post[t] for all t
+    # ------------------------------------------------------------------
+    # loss_grad[t] = dL/dx_post[t]
+    loss_grad = grad_fn(cache['backprop_signal'], target_signal)  # (T, dim_x, 1)
 
-    # Backward sweep: t = T-1 down to 0
+    # set 0 for the velocity term since we don't care about it
+    Gx_post[1:] += loss_grad.reshape(-1, 1, 1).repeat(2, axis=1)
+
+    # ------------------------------------------------------------------
+    # Backward sweep through time (t = T-1 ... 0)
+    # Each iteration unwinds ONE Kalman update + predict step
+    # ------------------------------------------------------------------
     for t in reversed(range(T)):
         n = t + 1  # adjoint index
 
+        # Forward quantities at timestep t
         x_p = x_prior[t]
         P_p = P_prior[t]
-        x_f = x_post[t]
-        P_f = P_post[t]
-        z = float(z_list[t])
-        S = float(S_list[t])
-        K = K_list[t]
+        z = float(z_list[t])      # scalar innovation
+        S = float(S_list[t].flatten()[0])      # scalar innovation covariance
+        K = K_list[t]             # (dim_x, 1)
 
-        # --- Step 8: P_f = (I - K H) P_p ---
+        # ==============================================================
+        # (8) Posterior covariance update:
+        #     P_f = (I - K H) P_p
+        # ==============================================================
         I = np.eye(dim_x)
-        A = I - K @ H  # (dim_x,dim_x)
+        A = I - K @ H               # (dim_x, dim_x)
 
-        A_bar = Gp_post[n] @ P_p.T  # adjoint through P_f -> A
+        # Backprop through matrix product
+        A_bar        = Gp_post[n] @ P_p.T
         Gp_prior[n] += A.T @ Gp_post[n]
-        GK[n] += -A_bar @ H.T
+        GK[n]       += -A_bar @ H.T
 
-        # --- Step 7: x_f = x_p + K z ---
+        # ==============================================================
+        # (7) Posterior state update:
+        #     x_f = x_p + K z
+        # ==============================================================
         Gx_prior[n] += Gx_post[n]
-        GK[n] += Gx_post[n] * z
-        Gy[n] += float(K.T @ Gx_post[n])
+        GK[n]       += Gx_post[n] * z
+        Gy[n]       += (K.T @ Gx_post[n])[0, 0]
 
-        # --- Step 6: K = P_p H^T S_inv ---
+        # ==============================================================
+        # (6) Kalman gain:
+        #     K = P_p H^T S^{-1}
+        # ==============================================================
         S_inv = 1.0 / S
-        u = P_p @ H.T  # (dim_x,1)
+        u = P_p @ H.T           # (dim_x, 1)
 
         Gp_prior[n] += (S_inv * GK[n]) @ H
-        GS_inv[n] += float(u.T @ GK[n])
+        GS_inv[n] += (u.T @ GK[n])[0, 0]
 
-        # --- Step 5: S_inv = 1/S ---
+        # ==============================================================
+        # (5) Inverse innovation covariance:
+        #     S^{-1} = 1 / S
+        # ==============================================================
         GS[n] += -GS_inv[n] * (1.0 / (S ** 2))
 
-        # --- Step 4: S = H P_p H^T + R ---
+        # ==============================================================
+        # (4) Innovation covariance:
+        #     S = H P_p H^T + R
+        # ==============================================================
         Gp_prior[n] += GS[n] * (H.T @ H)
-        dR += GS[n]
+        dR          += GS[n]
 
-        # --- Step 3: z = measurement - H x_p ---
-        Gx_prior[n] += - H.T * Gy[n]
+        # ==============================================================
+        # (3) Innovation:
+        #     z = measurement - H x_p
+        # ==============================================================
+        Gx_prior[n] += -H.T * Gy[n]
 
-        # --- Step 2: P_p = F P_prev F^T + Q ---
+        # ==============================================================
+        # (2) Prior covariance:
+        #     P_p = F P_prev F^T + Q
+        # ==============================================================
         Gp_prev = F.T @ Gp_prior[n] @ F
-        dQ += Gp_prior[n]
+        dQ     += Gp_prior[n]
 
-        # --- Step 1: x_p = F x_prev ---
+        # ==============================================================
+        # (1) Prior state:
+        #     x_p = F x_prev
+        # ==============================================================
         Gx_prev = F.T @ Gx_prior[n]
 
-        # Propagate to next earlier time
+        # Propagate adjoints to previous timestep
         Gx_post[n - 1] += Gx_prev
         Gp_post[n - 1] += Gp_prev
 
+    # ------------------------------------------------------------------
+    # Return raw gradients (linear space)
+    # ------------------------------------------------------------------
     return dQ, dR
 
 
-def kf_bank_backward(bank_cache, loss_fn, target_signal):
+def kf_bank_backward(caches, grad_fn, comp_dict):
     """
     Backpropagation for an entire PARALLEL Kalman Filter Bank.
 
@@ -584,6 +868,9 @@ def kf_bank_backward(bank_cache, loss_fn, target_signal):
     bank_cache : dict
         Output of kf_bank_forward(). Contains list bank_cache["caches"].
     smooth_mse_grad : callable
+        Gradient function for the desired loss function
+    comp_dict : dict
+        Dictionary of the time series values for the individual FFT components
 
     Returns
     -------
@@ -600,17 +887,24 @@ def kf_bank_backward(bank_cache, loss_fn, target_signal):
     - This method is a simple wrapper around kf_single_backward().
     """
 
-    caches = bank_cache["caches"]
-    M = bank_cache["N_filters"]
+    dQ_list = np.zeros((len(caches), 2, 2))
+    dR_list = np.zeros(len(caches))
+    combined_target_signal = np.zeros_like(caches[0]['z'])
+    combined_bank_output = np.zeros_like(caches[0]['z'])
 
-    dQ_list = []
-    dR_list = []
+    # step through filters in reverse order (high -> low)
+    for i, tk in enumerate(reversed(tqdm(comp_dict.keys()))):
+        filter_idx = len(caches) - i - 1
+        # add this truth component to the target signal
+        combined_target_signal += comp_dict[tk]
+        combined_bank_output += caches[filter_idx]['x_post'][:, 0]
+        caches[filter_idx]['backprop_signal'] = combined_bank_output.reshape(-1, 1)
 
-    for i in range(M):
-        cache_i = caches[i]
-        dQ_i, dR_i = kf_single_backward(cache_i, smooth_mse_grad)
-        dQ_list.append(dQ_i)
-        dR_list.append(dR_i)
+        # compute gradient of *this* filter w/r to the aggregated target signal
+        dQ_i, dR_i = kf_single_backward(caches[filter_idx], grad_fn, combined_target_signal)
+        # store
+        dQ_list[filter_idx] = dQ_i
+        dR_list[filter_idx] = dR_i
 
     return dQ_list, dR_list
 
@@ -628,7 +922,6 @@ def train_filter_bank_grad(filter_bank,
     # fetch the chosen objective definition
     loss_fn = OBJECTIVES[objective_name]['fn']
     grad_fn = GRADIENTS[objective_name]['fn']
-    n_filters = len(filter_bank.filters)
 
     # Initialize exponent parameters and moments
     q_linear = filter_bank.sigma_xi.copy()
@@ -640,52 +933,57 @@ def train_filter_bank_grad(filter_bank,
     m_r = np.zeros_like(r_log)
     v_r = np.zeros_like(r_log)
     losses = np.zeros((n_epochs, 2))
+    train_loss, test_loss = 0.0, 0.0
 
     pre_context_train = data['train']
     pre_context_test = data['test']
 
-    # Initialize gradient arrays
-    grad_q = np.zeros_like(filter_bank.sigma_xi, dtype=float)
-    grad_r = np.zeros_like(filter_bank.sigma_xi, dtype=float)
+    # establish per-epoch plotting of filter
+    plt.plot(pre_context_train['raw'], alpha=.25, color='k')
+    plt.plot(pre_context_train['truth'], label=f'truth')
+    cmap = plt.cm.copper
+    colors = [cmap(i) for i in np.linspace(0, 1, n_epochs)]
 
     # begin training
     tStart = time.time()
-    for epoch in range(n_epochs):
+    for epoch in range(1, n_epochs+1):
+        print(f'Epoch {epoch}')
+        time.sleep(.1)
 
-        # Compute current losses
+        # Compute train gradient
         filter_bank.reset_states()
-        bank_cache = kf_bank_forward(filter_bank, pre_context_train['raw'])
-        grad = kf_bank_backprop()
-        # filter_dict = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
-        # obj_ctx = build_objective_context(pre_context_train, filter_dict, objective_name)
-        train_loss = 0  # loss_fn(obj_ctx)
+        # print(f'\tForward Prop for {len(filter_bank)} filters...')
+        bank_cache = kf_bank_forward(filter_bank, pre_context_train['raw'], adapt='R')
+        filter_sum = np.zeros_like(pre_context_train['raw'])
+        for i in range(len(bank_cache)):
+            filter_sum += bank_cache[i]['x_post'][:, 0]
+        plt.plot(filter_sum, label=f'Epoch {epoch}', color=colors[epoch-1], alpha=.5)
 
-        filter_bank.reset_states()
-        filter_dict_test = run_filter_bank(filter_bank, pre_context_test['raw'], verbose=False)
-        obj_ctx_test = build_objective_context(pre_context_test, filter_dict_test, objective_name)
-        test_loss = loss_fn(obj_ctx_test)
+        # print(f'\tBackward Prop for {len(filter_bank)} filters...')
+        dQ, dR = kf_bank_backward(bank_cache, grad_fn, pre_context_train['comp_dict'])
 
-        losses[epoch] = [train_loss, test_loss]
-        print(f"Epoch {epoch}/{n_epochs}, Loss: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
-        print(f'\tQ Scalars: {q_log}')
-        print(f'\tR Scalars: {r_log}')
+        # update log parameters with gradient
+        grad_r = dR * filter_bank.rho
+        grad_q = np.zeros(len(filter_bank))
+        for i, kf in enumerate(filter_bank.filters):
+            grad_q[i] = 2.0 * (filter_bank.sigma_xi[i] ** 2) * np.sum(dQ[i] * filter_bank.dt * kf.Q)
 
-        print(f'\nTraining filters...')
-        for i in range(n_filters):
-            print(f'\tAdjusting filter {i+1}/{n_filters}')
+        # bank_cache['x'] = bank_cache['x_post']
+        # obj_ctx = build_objective_context(pre_context_train, bank_cache, objective_name)
+        train_loss = opt_util.discrim_smooth_mse(cache=bank_cache, comp_dict=pre_context_train['comp_dict'])
+        # train_loss = opt_util.smooth_mse(pre_context_train['truth'], filter_sum)
 
-            # Perturb positively, run filter bank
-            filter_bank.reset_states()
-            q_linear[i] = 10**(orig_value + autograd_epsilon)
-            filter_bank.filters[i].set_q(q_linear[i])
-            filter_dict_plus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
+        # compute test gradient
+        # filter_bank.reset_states()
+        # filter_dict_test = run_filter_bank(filter_bank, pre_context_test['raw'], verbose=False)
+        # obj_ctx_test = build_objective_context(pre_context_test, filter_dict_test, objective_name)
+        test_loss = 0.0  # loss_fn(obj_ctx_test)
 
-            # compute loss for positive perturbation
-            obj_ctx = build_objective_context(pre_context_train, filter_dict_plus, objective_name)
-            loss_plus = loss_fn(obj_ctx)
-
-            grad_q[i] = grad_fn()
-            grad_r[i] = grad_fn()
+        # print results
+        losses[epoch-1] = [train_loss, test_loss]
+        print(f"\tLoss: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
+        # print(f'\tQ Scalars: {q_log}')
+        # print(f'\tR Scalars: {r_log}')
 
         # Update biased moments for Q exponents
         m_q = beta1 * m_q + (1 - beta1) * grad_q
@@ -694,39 +992,39 @@ def train_filter_bank_grad(filter_bank,
         m_q_hat = m_q / (1 - beta1 ** (epoch+1))
         v_q_hat = v_q / (1 - beta2 ** (epoch+1))
         # Parameter update
-        q_log -= alpha * m_q_hat / (np.sqrt(v_q_hat) + eps)
+        q_log += alpha * m_q_hat / (np.sqrt(v_q_hat) + eps)
 
         # Repeat for R exponents
         m_r = beta1 * m_r + (1 - beta1) * grad_r
         v_r = beta2 * v_r + (1 - beta2) * (grad_r ** 2)
         m_r_hat = m_r / (1 - beta1 ** (epoch+1))
         v_r_hat = v_r / (1 - beta2 ** (epoch+1))
-        r_log -= alpha * m_r_hat / (np.sqrt(v_r_hat) + eps)
+        r_log += alpha * m_r_hat / (np.sqrt(v_r_hat) + eps)
 
         # Update the filter bank matrices; reset state
-        for i, fil in enumerate(filter_bank.filters):
-            fil.set_q(10**q_log[i])
-            fil.set_r(10**r_log[i])
-            fil.x = np.zeros_like(fil.x)
-            if reset_cov:
-                fil.P *= 1e5
+        filter_bank.set_q(10**q_log)
+        filter_bank.set_r(10**r_log)
+        filter_bank.reset_cov()
+        filter_bank.reset_states()
 
-    # Final loss reporting
-    filter_bank.reset_states()
-    filter_dict = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
-    obj_ctx = build_objective_context(pre_context_train, filter_dict, objective_name)
-    train_loss = loss_fn(obj_ctx)
+    # plot the final filter
+    bank_cache = kf_bank_forward(filter_bank, pre_context_train['raw'], adapt='R')
+    filter_sum = np.zeros_like(pre_context_train['raw'])
+    for i in range(len(bank_cache)):
+        filter_sum += bank_cache[i]['x_post'][:, 0]
+    plt.plot(filter_sum, label=f'Final Estimate', color='blue')
+    plt.legend()
 
-    filter_bank.reset_states()
-    filter_dict_test = run_filter_bank(filter_bank, pre_context_test['raw'], verbose=False)
-    obj_ctx_test = build_objective_context(pre_context_test, filter_dict_test, objective_name)
-    test_loss = loss_fn(obj_ctx_test)
+    plt.figure()
+    plt.plot(np.arange(1, n_epochs+1), losses)
 
     print(f"\n\nFinal Loss after {n_epochs} epochs: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
     # Display the optimised noise parameters
     print(f'Fitted Q Exponents: {q_log}')
     print(f'Fitted R Exponents: {r_log}')
     print(f'Run Time: {(time.time() - tStart)/60} mins')
+
+    return filter_bank
 
 
 def plot_filter_bank(meas, bank_dict, dt, objective_function, truth_pos=None):
@@ -845,11 +1143,13 @@ class RunConfig:
     truth_extraction_config: dict
     grad_desc_config: dict
 
-    def __init__(self, train_times, test_times, objective_str):
+    def __init__(self, train_times, test_times, objective_str, tracker_pkl):
         # assign input values
         self.train_times = train_times
         self.test_times = test_times
         self.objective = objective_str
+        self.tracker = SinusoidalFilterBank()
+        # self.save_root = output_root
 
         # create the structures to choose hyperparams based on objective function
         self.init_filter_bank_parameters()
@@ -868,44 +1168,54 @@ class RunConfig:
         # build the gradient descent config
         self.build_grad_desc_config()
 
+        # load the tracker
+        self.load_tracker(tracker_pkl)
+
     def init_filter_bank_parameters(self):
         self.omega_dict = {'pos_mse': np.array([0.02, 0.66, 2.04, 3.9]),
                            'vel_mse': np.array([0.02, 0.66, 2.04, 3.9]),
                            'spread_max': np.array([0.02, 0.1, .25, 0.66]),
-                           'anova_loss': np.array([0.02, 0.66, 2.04, 3.9])}
+                           'anova_loss': np.array([0.02, 0.66, 2.04, 3.9]),
+                           'discrim_mse': np.arange(0.1, 2.1, .1)}
         n_omega = len(self.omega_dict[self.objective])
 
         # R matrix scalar values
         self.rho0_dict = {'pos_mse': [10**(-0.5)]*n_omega,  # replace rho0/sigmaXi0 w/ grid search results
                           'vel_mse': [10**(-0.5)]*n_omega,
                           'spread_max': 10**np.array([0.46352044,  0.5294198,   0.67744341, -0.19491549]),
-                          'anova_loss': [10**(-0.0)]*n_omega}
+                          'anova_loss': [10**(-0.0)]*n_omega,
+                          'discrim_mse': [10**(1.0)]*n_omega}
 
         # Q matrix scalar values
         self.sigma_xi0_dict = {'pos_mse': [10**0.5]*n_omega,
                                'vel_mse': [10**0.5]*n_omega,
                                'spread_max': 10**np.array([-1.10086254, -0.99297798, -0.71250029,  0.87094734]),
-                               'anova_loss': [10**0.0]*n_omega}
+                               'anova_loss': [10**0.0]*n_omega,
+                               'discrim_mse': [10**(-1.0)]*n_omega}
 
     def init_truth_extraction_parameters(self):
         self.fft_max_freq_dict = {'pos_mse': 5,
                                   'vel_mse': 2,
                                   'spread_max': 5,
-                                  'anova_loss': 5}
+                                  'anova_loss': 5,
+                                  'discrim_mse': max(self.omega_dict[self.objective])}
         self.label_cluster_cdf_thresh_dict = {'pos_mse': .95,
                                               'vel_mse': .95,
                                               'spread_max': .95,
-                                              'anova_loss': .95}
+                                              'anova_loss': .95,
+                                              'discrim_mse': .95}
 
     def init_grad_desc_parameters(self):
         self.alpha_dict = {'pos_mse': 2.5e-2,
                            'vel_mse': 5e-2,
                            'spread_max': 2.5e-2,
-                           'anova_loss': 2.5e-2}
+                           'anova_loss': 2.5e-2,
+                           'discrim_mse': 5e-1}
         self.epoch_dict = {'pos_mse': 14,
                            'vel_mse': 12,
                            'spread_max': 4,
-                           'anova_loss': 12}
+                           'anova_loss': 12,
+                           'discrim_mse': 5}
 
     def build_selections(self):
         # build training selection
@@ -933,6 +1243,11 @@ class RunConfig:
     def build_grad_desc_config(self):
         self.grad_desc_config = {'alpha': self.alpha_dict[self.objective],
                                  'epoch': self.epoch_dict[self.objective]}
+
+    def load_tracker(self, tracker_pkl):
+        if type(tracker_pkl) is str:
+            tracker_pkl = pickle.load(open(tracker_pkl, 'rb'))
+        self.tracker = tracker_pkl
 
     def to_str(self):
         # init the return string
@@ -968,7 +1283,7 @@ if __name__ == "__main__":
     # set initial parameters
     train_selection = [datetime.datetime(2025, 7, 31).timestamp(), datetime.datetime(2025, 8, 10).timestamp() - 1]
     test_selection = [datetime.datetime(2025, 8, 11).timestamp(), datetime.datetime(2025, 8, 12).timestamp() - 1]
-    objective = 'pos_mse'
+    objective = 'discrim_mse'
     subdir_str = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     # save_root = f'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\4_Fall\\CS-591\\training_sessions\\{objective}'
     save_root = f'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2026\\Capstone 2\\training_sessions\\{objective}'
@@ -978,56 +1293,40 @@ if __name__ == "__main__":
     # construct the run config
     run_cfg = RunConfig(train_times=train_selection,
                         test_times=test_selection,
-                        objective_str=objective)
-    # run_cfg.grad_desc_config['epoch'] = 3  # overwrite epochs for testing functionality
+                        objective_str=objective,
+                        tracker_pkl=None)
 
     # construct full precontext
-    pre_context = build_objective_precontext(selection=run_cfg.data_selections,
-                                             omegas=run_cfg.filter_bank_config['omegas'],
-                                             obj_name=run_cfg.objective,
-                                             max_freq=run_cfg.truth_extraction_config['max_freq'],
-                                             cluster_cdf=run_cfg.truth_extraction_config['cluster_cdf'])
+    pre_context = build_objective_precontext(run_cfg)
     pre_context['save_root'] = save_root
+
+    # save the run config
     with open(f'{save_root}\\{objective}_shot_notes.txt', 'w') as f:
         f.write('Run Config Notes:\n')
         f.write(run_cfg.to_str())
         f.close()
 
     # Construct the filter bank w/ the following sinusoidal frequencies
-    p0 = 1e-2
-    # fbank = SinusoidalFilterBank(
-    #     omegas=run_cfg.filter_bank_config['omegas'],
-    #     dt=pre_context['train']['dt'],
-    #     sigma_xi=run_cfg.filter_bank_config['sigma_xi'],
-    #     rho=run_cfg.filter_bank_config['rho'],
-    #     p0=p0
-    # )
-    per_omega_extract = util.extract_component_reconstructions(pre_context['train']['raw'],
-                                                               pre_context['train']['dt'],
-                                                               max_freq=2)
-    omegas = np.array(list(per_omega_extract.keys()))
-    fbank = SinusoidalFilterBank(omegas=omegas,
-                                 dt=pre_context['train']['dt'],
-                                 sigma_xi=[10**0.0]*len(omegas),
-                                 rho=[10**0.0]*len(omegas),
-                                 p0=p0*len(omegas))
+    p0 = 1e-5
+    fbank = SinusoidalFilterBank(
+        omegas=run_cfg.filter_bank_config['omegas'],
+        dt=pre_context['train']['dt'],
+        sigma_xi=run_cfg.filter_bank_config['sigma_xi'],
+        rho=run_cfg.filter_bank_config['rho'],
+        p0=p0
+    )
 
     # Train the filter bank
-    # trained_filter_bank, q_log_final, r_log_final = train_filter_bank_adam(filter_bank=fbank,
-    #                                                                        data=pre_context,
-    #                                                                        objective_name=objective,
-    #                                                                        n_epochs=run_cfg.grad_desc_config['epoch'],
-    #                                                                        alpha=run_cfg.grad_desc_config['alpha'],
-    #                                                                        reset_cov=False)
-    train_filter_bank_grad(filter_bank=fbank,
-                           data=pre_context,
-                           objective_name=objective,
-                           n_epochs=run_cfg.grad_desc_config['epoch'],
-                           alpha=run_cfg.grad_desc_config['alpha'],
-                           reset_cov=False)
+    trained_filter_bank = train_filter_bank_grad(filter_bank=fbank,
+                                                 data=pre_context,
+                                                 objective_name=objective,
+                                                 n_epochs=run_cfg.grad_desc_config['epoch'],
+                                                 alpha=run_cfg.grad_desc_config['alpha'],
+                                                 reset_cov=False)
+
     with open(f'{save_root}\\{objective}_shot_notes.txt', 'a') as f:
-        f.write(f'\n\nFinal Q (log10): {q_log_final}\n')
-        f.write(f'Final R (log10): {r_log_final}')
+        f.write(f'\n\nFinal Q (log10): {np.log10(trained_filter_bank.sigma_xi)}\n')
+        f.write(f'Final R (log10): {np.log10(trained_filter_bank.rho)}')
         f.close()
     pickle.dump(trained_filter_bank, open(f'{save_root}\\filter_bank.pkl', 'wb'))
     pickle.dump(run_cfg, open(f'{save_root}\\run_config.pkl', 'wb'))

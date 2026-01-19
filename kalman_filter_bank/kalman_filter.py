@@ -34,6 +34,9 @@ class SinusoidalKalmanFilter(KalmanFilter):
         self.R = r_matrix(self.dim_z, rho)
         self.rho = rho
 
+    def set_p(self, p):
+        self.P = p*np.eye(self.x.shape[0])
+
 
 def r_matrix(meas_shape, rho):
     # return identity matrix of R values
