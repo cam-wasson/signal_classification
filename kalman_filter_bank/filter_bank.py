@@ -163,7 +163,7 @@ class SinusoidalFilterBank(FilterBank):
     # ------------------------------------------------------------------
     # TRACKING FILTER (cascading, stationary signal generator)
     # ------------------------------------------------------------------
-    def step_tracking(self, meas):
+    def step_cascade(self, meas):
         """
         Cascading filter bank.
         Produces a stationary residual.
@@ -182,7 +182,7 @@ class SinusoidalFilterBank(FilterBank):
     # ------------------------------------------------------------------
     # DISCRIMINATION FILTER (parallel, state-producing)
     # ------------------------------------------------------------------
-    def step_discrimination(self, meas):
+    def step_parallel(self, meas):
         """
         Parallel filter bank.
         Produces per-filter states for datamining / learning.
@@ -242,7 +242,7 @@ class NarrowbandTrackingFilterBank(SinusoidalFilterBank):
         )
 
     def step(self, z):
-        _, x_sum, P_sum = self.step_tracking(z)
+        _, x_sum, P_sum = self.step_cascade(z)
         return x_sum, P_sum
 
 

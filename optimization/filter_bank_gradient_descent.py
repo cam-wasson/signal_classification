@@ -83,8 +83,9 @@ def discrim_mse_precontext(selections, max_freq_fft=2.0, dt=1/(24*60), tracker=N
             stationary_signal = (rate_pad - nb_fft_dict['truth'])[pad_idx[0]: pad_idx[1]]
         else:
             # run the tracker on the rates
+            tracker_output = run_filter_bank(tracker, rate_arr)
             # extract the stationary signal from the tracker
-            pass
+            stationary_signal = np.concatenate(([0], np.diff(tracker_output['x'][:, 0])))
 
         # fit z-scale parameters
         if i == 0:
@@ -580,8 +581,8 @@ def kf_single_forward_iae(
         # IAE diagnostics
         "nis": np.zeros(N),
         "nis_ema": np.zeros(N),
-        "R_scale": np.zeros(N),
-        "Q_scale": np.zeros(N),
+        "alpha": np.zeros(N),
+        "beta": np.zeros(N),
 
         # Static matrices
         "F": kf.F.copy(),
@@ -610,8 +611,8 @@ def kf_single_forward_iae(
         if adapt in ("Q", "both"):
             kf.Q = alpha * Q0
 
-        cache["R_scale"][n] = beta
-        cache["Q_scale"][n] = alpha
+        cache["beta"][n] = beta
+        cache["alpha"][n] = alpha
 
         # ---- Predict ----
         kf.predict()
@@ -731,6 +732,8 @@ def kf_single_backward(cache, grad_fn, target_signal):
     Q = cache["Q0"]                 # Process noise covariance
     R = cache["R0"]                 # Measurement noise covariance
     T = cache["N"]                 # Number of timesteps
+    alpha = cache['alpha']         # adaptive scalar of the Q matrix
+    beta = cache['beta']           # adaptive scalar of the R matrix
 
     x_prior = cache["x_prior"]     # (T, dim_x, 1)
     P_prior = cache["P_prior"]     # (T, dim_x, dim_x)
@@ -828,7 +831,7 @@ def kf_single_backward(cache, grad_fn, target_signal):
         #     S = H P_p H^T + R
         # ==============================================================
         Gp_prior[n] += GS[n] * (H.T @ H)
-        dR          += GS[n]
+        dR          += GS[n] * beta[t]
 
         # ==============================================================
         # (3) Innovation:
@@ -841,7 +844,7 @@ def kf_single_backward(cache, grad_fn, target_signal):
         #     P_p = F P_prev F^T + Q
         # ==============================================================
         Gp_prev = F.T @ Gp_prior[n] @ F
-        dQ     += Gp_prior[n]
+        dQ     += Gp_prior[n] * alpha[t]
 
         # ==============================================================
         # (1) Prior state:
@@ -917,7 +920,7 @@ def train_filter_bank_grad(filter_bank,
                            beta1=.9,  # bias factor 1
                            beta2=.999,  # bias factor 2
                            eps=1e-8,
-                           reset_cov=True):
+                           ):
 
     # fetch the chosen objective definition
     loss_fn = OBJECTIVES[objective_name]['fn']
@@ -939,12 +942,13 @@ def train_filter_bank_grad(filter_bank,
     pre_context_test = data['test']
 
     # establish per-epoch plotting of filter
-    plt.plot(pre_context_train['raw'], alpha=.25, color='k')
+    plt.scatter(np.arange(len(pre_context_train['raw'])), pre_context_train['raw'], alpha=.5, color='k', s=5)
     plt.plot(pre_context_train['truth'], label=f'truth')
     cmap = plt.cm.copper
     colors = [cmap(i) for i in np.linspace(0, 1, n_epochs)]
 
     # begin training
+    adapt = 'R'  # Q, R, both
     tStart = time.time()
     for epoch in range(1, n_epochs+1):
         print(f'Epoch {epoch}')
@@ -953,7 +957,7 @@ def train_filter_bank_grad(filter_bank,
         # Compute train gradient
         filter_bank.reset_states()
         # print(f'\tForward Prop for {len(filter_bank)} filters...')
-        bank_cache = kf_bank_forward(filter_bank, pre_context_train['raw'], adapt='R')
+        bank_cache = kf_bank_forward(filter_bank, pre_context_train['raw'], adapt=adapt)
         filter_sum = np.zeros_like(pre_context_train['raw'])
         for i in range(len(bank_cache)):
             filter_sum += bank_cache[i]['x_post'][:, 0]
@@ -1008,7 +1012,7 @@ def train_filter_bank_grad(filter_bank,
         filter_bank.reset_states()
 
     # plot the final filter
-    bank_cache = kf_bank_forward(filter_bank, pre_context_train['raw'], adapt='R')
+    bank_cache = kf_bank_forward(filter_bank, pre_context_train['raw'], adapt=adapt)
     filter_sum = np.zeros_like(pre_context_train['raw'])
     for i in range(len(bank_cache)):
         filter_sum += bank_cache[i]['x_post'][:, 0]
@@ -1291,10 +1295,11 @@ if __name__ == "__main__":
     os.makedirs(save_root)
 
     # construct the run config
+    tracker_path = None  # 'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2026\\Capstone 2\\narrowband_tracking_bank.pkl'
     run_cfg = RunConfig(train_times=train_selection,
                         test_times=test_selection,
                         objective_str=objective,
-                        tracker_pkl=None)
+                        tracker_pkl=tracker_path)
 
     # construct full precontext
     pre_context = build_objective_precontext(run_cfg)
@@ -1321,8 +1326,7 @@ if __name__ == "__main__":
                                                  data=pre_context,
                                                  objective_name=objective,
                                                  n_epochs=run_cfg.grad_desc_config['epoch'],
-                                                 alpha=run_cfg.grad_desc_config['alpha'],
-                                                 reset_cov=False)
+                                                 alpha=run_cfg.grad_desc_config['alpha'])
 
     with open(f'{save_root}\\{objective}_shot_notes.txt', 'a') as f:
         f.write(f'\n\nFinal Q (log10): {np.log10(trained_filter_bank.sigma_xi)}\n')
