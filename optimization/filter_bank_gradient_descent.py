@@ -1016,7 +1016,7 @@ def train_filter_bank_grad(filter_bank,
     filter_sum = np.zeros_like(pre_context_train['raw'])
     for i in range(len(bank_cache)):
         filter_sum += bank_cache[i]['x_post'][:, 0]
-    plt.plot(filter_sum, label=f'Final Estimate', color='blue')
+    plt.plot(filter_sum, label=f'Final Estimate', color='orange')
     plt.legend()
 
     plt.figure()
