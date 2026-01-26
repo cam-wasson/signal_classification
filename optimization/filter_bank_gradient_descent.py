@@ -958,10 +958,10 @@ def train_filter_bank_grad(filter_bank,
         filter_bank.reset_states()
         # print(f'\tForward Prop for {len(filter_bank)} filters...')
         bank_cache = kf_bank_forward(filter_bank, pre_context_train['raw'], adapt=adapt)
-        filter_sum = np.zeros_like(pre_context_train['raw'])
-        for i in range(len(bank_cache)):
-            filter_sum += bank_cache[i]['x_post'][:, 0]
-        plt.plot(filter_sum, label=f'Epoch {epoch}', color=colors[epoch-1], alpha=.5)
+        # filter_sum = np.zeros_like(pre_context_train['raw'])
+        # for i in range(len(bank_cache)):
+        #     filter_sum += bank_cache[i]['x_post'][:, 0]
+        # plt.plot(filter_sum, label=f'Epoch {epoch}', color=colors[epoch-1], alpha=.5)
 
         # print(f'\tBackward Prop for {len(filter_bank)} filters...')
         dQ, dR = kf_bank_backward(bank_cache, grad_fn, pre_context_train['comp_dict'])

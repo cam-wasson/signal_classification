@@ -246,6 +246,154 @@ class NarrowbandTrackingFilterBank(SinusoidalFilterBank):
         return x_sum, P_sum
 
 
+class DiscriminationFilterBank(SinusoidalFilterBank):
+    DEFAULT_OMEGAS = np.arange(0.1, 2.1, .1, dtype=float)
+
+    def __init__(self,
+                 dim_x=2,
+                 dim_z=1,
+                 dt=0.0,
+                 sigma_xi=0.1,
+                 rho=1e-2,
+                 p0=None,
+                 omegas=None,
+                 use_iae=True,
+                 step='cascade'):
+
+        if omegas is None:
+            omegas_arr = self.DEFAULT_OMEGAS.copy()
+        else:
+            omegas_arr = omegas
+        n = len(omegas_arr)
+
+        self._step = step
+
+        # set IAE logic here
+        self._use_iae = use_iae
+        if use_iae:
+            self.alpha_ema = 0.05  # EMA smoothing for NIS
+            self.eta_R = 0.02  # adaptation rate for R scale
+            self.eta_Q = 0.005  # adaptation rate for Q scale (usually slower)
+            self.R_bounds = (1e-3, 1e3)  # bounds on scalar beta
+            self.Q_bounds = (1e-6, 1e6)  # bounds on scalar alpha
+
+            # Log-scales (log-space keeps positivity)
+            self.log_beta = [1.0] * n  # for R
+            self.log_alpha = [1.0] * n  # for Q
+            self.adapt = 'R'
+
+        # Ensures sigma_xi and rho are iterable arrays of length n.
+        if np.isscalar(sigma_xi):
+            sigma_xi_arr = np.full(n, float(sigma_xi), dtype=float)
+        else:
+            sigma_xi_arr = np.array(sigma_xi, dtype=float)
+            if sigma_xi_arr.shape[0] != n:
+                raise ValueError(
+                    f"sigma_xi must have length {n}, got {sigma_xi_arr.shape[0]}")
+        if np.isscalar(rho):
+            rho_arr = np.full(n, float(rho), dtype=float)
+        else:
+            rho_arr = np.array(rho, dtype=float)
+            if rho_arr.shape[0] != n:
+                raise ValueError(
+                    f"rho must have length {n}, got {rho_arr.shape[0]}")
+
+        super().__init__(
+            dim_x=dim_x,
+            dim_z=dim_z,
+            omegas=omegas_arr,
+            dt=dt,
+            sigma_xi=sigma_xi_arr,
+            rho=rho_arr,
+            p0=p0,
+        )
+
+        if self._use_iae:
+            # store the base matrices of the filter bank
+            self.R0_arr = np.zeros(np.concatenate([[len(self.filters)], self.filters[0].R.shape]))
+            self.Q0_arr = np.zeros(np.concatenate([[len(self.filters)], self.filters[0].Q.shape]))
+            for i, kf in enumerate(self.filters):
+                self.R0_arr[i] = kf.R.copy()
+                self.Q0_arr[i] = kf.Q.copy()
+
+    def step(self, residual):
+        # Target mean of NIS is dim_z (for consistent KF)
+        nis_target, nis_ema = float(self.dim_z), float(self.dim_z)
+
+        # compute per-filter and combined output here
+        cache = {'combined': {"meas": residual,
+                              "x": np.array([]),
+                              "P": np.array([])}}
+        x_combined = np.zeros([self.dim_x], dtype=float)
+        P_combined = np.zeros([self.dim_x, self.dim_x], dtype=float)
+        for i, kf in enumerate(self.filters):
+            if self._use_iae:
+                # ---- Apply current scalings BEFORE predict/update ----
+                beta = float(np.clip(np.exp(self.log_beta[i]), self.R_bounds[0], self.R_bounds[1]))
+                alpha = float(np.clip(np.exp(self.log_alpha[i]), self.Q_bounds[0], self.Q_bounds[1]))
+
+                if self.adapt in ("R", "both"):
+                    kf.R = beta * self.R0_arr[i]
+                if self.adapt in ("Q", "both"):
+                    kf.Q = alpha * self.Q0_arr[i]
+
+            # get this cache ready
+            if kf.omega not in cache.keys():
+                cache[kf.omega] = {}
+
+            # ---- Predict ----
+            kf.predict()
+            cache[kf.omega]['x_prior'] = kf.x_prior.copy()
+            cache[kf.omega]["P_prior"] = kf.P_prior.copy()
+
+            # ---- Update ----
+            kf.update([residual])
+            cache[kf.omega]["x_post"] = kf.x_post.copy()
+            cache[kf.omega]["P_post"] = kf.P_post.copy()
+            cache[kf.omega]["S"] = np.array(kf.S)
+            cache[kf.omega]["K"] = np.array(kf.K)
+            x_combined += kf.x_post.copy()
+            P_combined += kf.P_post.copy()
+
+            # Measurement and innovation
+            cache[kf.omega]["meas"] = residual
+            cache[kf.omega]["innov"] = np.array(kf.y).reshape(-1)
+
+            # update residual for the next filter if cascading filter
+            if self._step == 'cascade':
+                residual -= cache[kf.omega]["x_post"][0]
+
+            if self._use_iae:
+                # ---- NIS computation ----
+                S = np.array(kf.S)
+                y = np.array(kf.y).reshape(-1)
+                if self.dim_z == 1:
+                    nis = float((y[0] * y[0]) / (S[0, 0] + 1e-12))
+                else:
+                    # Solve S^{-1} y without explicitly inverting
+                    nis = float(y.T @ np.linalg.solve(S + 1e-12*np.eye(self.dim_z), y))
+
+                cache[kf.omega]["nis"] = nis
+
+                # ---- Smooth NIS (optional, recommended) ----
+                nis_ema = (1.0 - self.alpha_ema) * nis_ema + self.alpha_ema * nis
+                cache[kf.omega]["nis_ema"] = nis_ema
+
+                # ---- Adaptation signal ----
+                drive = nis_ema - nis_target
+
+                # ---- Update log-scales ----
+                #  If NIS > target, increase assumed uncertainty b/c residuals too large
+                if self.adapt in ("R", "both"):
+                    self.log_beta[i] += self.eta_R * drive
+                if self.adapt in ("Q", "both"):
+                    self.log_alpha[i] += self.eta_Q * drive
+
+        cache['combined']['x'] = x_combined
+        cache['combined']['P'] = P_combined
+        return cache
+
+
 class SinusoidalCMMEAFilterBank(SinusoidalFilterBank):
     def __init__(self, dim_x=2, dim_z=1, omegas=None, dt=0.0, sigma_xi=0.1, rho=1e-2):
         # build the parent sinusoidal filter bank
@@ -338,19 +486,19 @@ def run_filter_bank(fbank, measurements, verbose=True):
     return {'x': all_states, 'p': all_covs, 'w': all_weights, 'amp': all_amp, 'phi': all_phi, 'omega': fbank.omegas}
 
 
-def create_sig_dict(price_df, random_date=True):
+def create_sig_dict(price_df, random_date=True, max_freq=10, dt=1/1440):
     if random_date:
         date = price_df['Date'].sample(n=1).iloc[0]
     else:
-        date = '2022-04-07'  # Good Dates: 2022-04-07, 2022-08-24, 2022-07-15
-    date_df = price_df.loc[price_df.Date == date]
-    rate_signal = (date_df['Open'].values -
-                   date_df['Open'].values[0]) / date_df['Open'].values[0]
+        date = '2022-07-15'  # Good Dates: 2022-04-07, 2022-08-24, 2022-07-15
+    # date_df = price_df.loc[price_df.Date == date]
+    rate_signal = (price_df['Open'].values -
+                   price_df['Open'].values[0]) / price_df['Open'].values[0]
 
     # pad signal, compute omegas
     padded_signal, true_bounds = pad_signal(rate_signal)
-    dt = 1 / len(rate_signal)
-    sig_dict = extract_low_pass_components(padded_signal, dt, max_freq=10)
+    # dt = 1 / len(rate_signal)
+    sig_dict = extract_low_pass_components(padded_signal, dt, max_freq=max_freq)
     sig_dict['truth_pad'] = sig_dict['truth']
     sig_dict['truth'] = sig_dict['truth_pad'][true_bounds[0]:true_bounds[1]]
     sig_dict['raw'] = rate_signal
@@ -427,11 +575,41 @@ def main(price_df):
     return cmmea_dict
 
 
+def discrim_filterbank_run(filter_bank, z):
+    total_cache = [{}]*len(z)
+    for n in range(len(z)):
+        total_cache[n] = filter_bank.step(z[n])
+
+    # combined_state = np.array([cache['combined']['x'] for cache in total_cache])
+    return total_cache
+
+
 if __name__ == '__main__':
     import pandas as pd
+    import pickle
+    import matplotlib.pyplot as plt
+    from matplotlib import use
+    use('Qt5Agg')
+
     # read in price df
     # path = 'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\2_Spring\\CS-614\\FinalProject\\data\\qqq_2022.csv'
     path = 'C:/Users/cwass/OneDrive/Desktop/Stock Sim/AutomationRepo/TradeSystem/Candlestick/notebooks/btc_1m.csv'
     data_df = pd.read_csv(path)
-    main(data_df)
+    fft_dict = create_sig_dict(data_df, random_date=False, max_freq=0.3)
+    stationary_signal = fft_dict['raw'] - fft_dict['truth']
+
+    # read in trained filter bank
+    bank_file_root = 'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2026\\Capstone 2\\training_sessions\\discrim_mse'
+    date_str = '2026-01-25_15-22-47'
+    trained_filter_bank = pickle.load(open(f'{bank_file_root}\\{date_str}\\filter_bank.pkl', 'rb'))
+
+    # adapt parameters into the Discrimination Filter Bank
+    dfb = DiscriminationFilterBank(dt=trained_filter_bank.dt,
+                                   omegas=trained_filter_bank.omegas,
+                                   sigma_xi=trained_filter_bank.sigma_xi,
+                                   rho=trained_filter_bank.rho,
+                                   p0=trained_filter_bank.p0)
+    output = discrim_filterbank_run(dfb, stationary_signal)
+
+    # main(data_df)
     print('asdf')
