@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import os
 import sys
 
@@ -7,7 +6,7 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
 
 from Labelling.ExtremaCluster import compute_cluster_dict
-from kalman_filter_bank.filter_bank import run_filter_bank, NarrowbandTrackingFilterBank
+from kalman_filter_bank.filter_bank import NarrowbandTrackingFilterBank
 from filter_bank_gradient_descent import build_objective_context
 import optimization_util as opt_util
 import util
@@ -19,7 +18,6 @@ from pathlib import Path
 import pickle
 import json
 import argparse
-
 
 
 NARROWBAND_OMEGAS = np.array([0.1, 0.17, 0.26], dtype=float)
@@ -122,14 +120,14 @@ def parse_args() -> argparse.Namespace:
                    help="Number of CV segments to train on.")
     p.add_argument("--days-per-segment", type=int, default=10,
                    help="Segment length in days (1-minute bars).")
-    p.add_argument("--max-freq-fft", type=float, default=0.5,
+    p.add_argument("--max-freq-fft", type=float, default=0.3,
                    help="FFT low-pass cutoff used to build truth/labels.")
     p.add_argument("--cluster-cdf-threshold", type=float,
                    default=0.9, help="CDF threshold for extrema clustering.")
 
     p.add_argument("--seed", type=int, default=42,
                    help="Seed for segment sampling.")
-    p.add_argument("--n-calls", type=int, default=250,
+    p.add_argument("--n-calls", type=int, default=200,
                    help="Total Bayesian optimization iterations.")
     p.add_argument("--n-initial-points", type=int, default=12,
                    help="Random init points before GP-guided search.")
@@ -137,16 +135,16 @@ def parse_args() -> argparse.Namespace:
                    help="skopt random_state for reproducibility.")
 
     p.add_argument(
-        "--q-exp-min", type=float, default=-2.0, help="Lower bound for log10(Q) exponents (per-omega)."
+        "--q-exp-min", type=float, default=-4.0, help="Lower bound for log10(Q) exponents (per-omega)."
     )
     p.add_argument(
         "--q-exp-max", type=float, default=2.0, help="Upper bound for log10(Q) exponents (per-omega)."
     )
     p.add_argument(
-        "--r-exp-min", type=float, default=-2.0, help="Lower bound for log10(R) exponents (per-omega)."
+        "--r-exp-min", type=float, default=-4.0, help="Lower bound for log10(R) exponents (per-omega)."
     )
     p.add_argument(
-        "--r-exp-max", type=float, default=2.0, help="Upper bound for log10(R) exponents (per-omega)."
+        "--r-exp-max", type=float, default=1.0, help="Upper bound for log10(R) exponents (per-omega)."
     )
 
     p.add_argument(
@@ -223,7 +221,7 @@ def main() -> None:
                 rho=rho,
                 omegas=omegas,
             )
-            filter_dict = run_filter_bank(bank, pre_ctx["raw"], verbose=False)
+            filter_dict = bank.run(pre_ctx["raw"], verbose=False)
 
             ctx = build_objective_context(
                 pre_ctx, filter_dict, obj_name="anova_loss")
@@ -288,6 +286,10 @@ def main() -> None:
         "rho": rho_best.tolist(),
         "best_mean_anova_loss": best_loss,
         "training": {
+            "q_min": args.q_exp_min,
+            "q_max": args.q_exp_max,
+            "r_min": args.r_exp_min,
+            "r_max": args.r_exp_max,
             "n_segments": args.n_segments,
             "days_per_segment": args.days_per_segment,
             "max_freq_fft": args.max_freq_fft,
