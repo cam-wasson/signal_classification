@@ -5,7 +5,30 @@ from kalman_filter_bank.kalman_filter import SinusoidalKalmanFilter
 from util import pad_signal, extract_low_pass_components
 
 
-import numpy as np
+from dataclasses import dataclass
+
+
+@dataclass
+class FilterBankObservation:
+    meas: float
+    spread: float
+    filter_pos: float
+    filter_vel: float
+    emp_vel: float
+    emp_acc: float
+
+
+@dataclass
+class FilterBankCache:
+    meas: list
+    spread: list
+    filter_pos: list
+    filter_vel: list
+    emp_vel: list
+    emp_acc: list
+
+    def update(self, ob: FilterBankObservation):
+        pass
 
 
 class FilterBank:
