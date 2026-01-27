@@ -1,4 +1,7 @@
 from __future__ import annotations
+from Labelling.ExtremaCluster import compute_cluster_dict
+from kalman_filter_bank.filter_bank import SinusoidalFilterBank
+import util
 
 import datetime
 # from dataclasses import dataclass
@@ -15,9 +18,6 @@ import sys
 sys.path.append('../kalman_filter_bank')
 sys.path.append('..')
 
-import util
-from filter_bank import SinusoidalFilterBank, run_filter_bank
-from Labelling.ExtremaCluster import compute_cluster_dict
 
 muse('Qt5Agg')
 
@@ -72,20 +72,25 @@ def discrim_mse_precontext(selections, max_freq_fft=2.0, dt=1/(24*60), tracker=N
         pre_ctx[sk] = {}
         # fetch this selection; rate scale
         price_df = util.fetch_price_space(conn=conn, selection=selections[sk])
-        rate_arr = (price_df.Open.values - price_df.Open.values[0]) / price_df.Open.values[0]
+        rate_arr = (price_df.Open.values -
+                    price_df.Open.values[0]) / price_df.Open.values[0]
 
         # stabilize the signal via tracker
         stationary_signal = np.zeros_like(rate_arr)
         if tracker is None:
             # if no tracker, remove the narrowband lowpass components
-            rate_pad, pad_idx = util.pad_signal(rate_arr, L=util.compute_pad_length(rate_arr))
-            nb_fft_dict = util.extract_low_pass_components(rate_pad, dt=dt, max_freq=0.3)
-            stationary_signal = (rate_pad - nb_fft_dict['truth'])[pad_idx[0]: pad_idx[1]]
+            rate_pad, pad_idx = util.pad_signal(
+                rate_arr, L=util.compute_pad_length(rate_arr))
+            nb_fft_dict = util.extract_low_pass_components(
+                rate_pad, dt=dt, max_freq=0.3)
+            stationary_signal = (
+                rate_pad - nb_fft_dict['truth'])[pad_idx[0]: pad_idx[1]]
         else:
             # run the tracker on the rates
-            tracker_output = run_filter_bank(tracker, rate_arr)
+            tracker_output = tracker.run(rate_arr)
             # extract the stationary signal from the tracker
-            stationary_signal = np.concatenate(([0], np.diff(tracker_output['x'][:, 0])))
+            stationary_signal = np.concatenate(
+                ([0], np.diff(tracker_output['x'][:, 0])))
 
         # fit z-scale parameters
         if i == 0:
@@ -95,7 +100,8 @@ def discrim_mse_precontext(selections, max_freq_fft=2.0, dt=1/(24*60), tracker=N
         # extract truth data from the stationary signal
         # stationary_pad, pad_idx = util.pad_signal(stationary_signal, L=util.compute_pad_length(stationary_signal))
         # scaled_stationary_signal = (stationary_signal - mu) / sigma
-        comp_dict = util.extract_component_reconstructions(stationary_signal, dt, max_freq_fft)
+        comp_dict = util.extract_component_reconstructions(
+            stationary_signal, dt, max_freq_fft)
 
         # remove padding from each component's reconstruction
         clean_signal = np.zeros_like(stationary_signal)
@@ -105,7 +111,8 @@ def discrim_mse_precontext(selections, max_freq_fft=2.0, dt=1/(24*60), tracker=N
             if (ck > -1e-8) and (ck < 1e-8):
                 continue
             # strip pad, add to reconstructed signal
-            comp_dict_clean[np.round(ck, 1)] = comp_dict[ck]  # [pad_idx[0]: pad_idx[1]]
+            # [pad_idx[0]: pad_idx[1]]
+            comp_dict_clean[np.round(ck, 1)] = comp_dict[ck]
             clean_signal += comp_dict_clean[np.round(ck, 1)]
 
         # store in dictionary
@@ -123,10 +130,12 @@ def pos_mse_precontext(selections, max_freq_fft=2.0, spectrum_thresh=None) -> di
 
     conn = util.connect('btc', db_root='../data')
     # get training data
-    train_price_df = util.fetch_price_space(conn=conn, selection=selections['train'])
+    train_price_df = util.fetch_price_space(
+        conn=conn, selection=selections['train'])
 
     # get test data
-    test_price_df = util.fetch_price_space(conn=conn, selection=selections['test'])
+    test_price_df = util.fetch_price_space(
+        conn=conn, selection=selections['test'])
 
     # read in measurement data
     z_train, z_test = ((train_price_df.Open.values - train_price_df.Open.values[0]) / train_price_df.Open.values[0],
@@ -139,18 +148,22 @@ def pos_mse_precontext(selections, max_freq_fft=2.0, spectrum_thresh=None) -> di
 
     # produce truth training data
     if spectrum_thresh is None:
-        fft_dict_train = util.extract_low_pass_components(z_pad, dt, max_freq=max_freq_fft)
+        fft_dict_train = util.extract_low_pass_components(
+            z_pad, dt, max_freq=max_freq_fft)
     else:
-        fft_dict_train = util.extract_low_pass_components_cdf_thresh(z_pad, dt, cdf_thresh=spectrum_thresh)
-    fft_dict_train['truth'] = fft_dict_train['truth'][pad_bounds[0]:pad_bounds[1]]  # fft reconstruction w/o pad
+        fft_dict_train = util.extract_low_pass_components_cdf_thresh(
+            z_pad, dt, cdf_thresh=spectrum_thresh)
+    fft_dict_train['truth'] = fft_dict_train['truth'][pad_bounds[0]                                                      :pad_bounds[1]]  # fft reconstruction w/o pad
 
     pad_len = util.compute_pad_length(z_test)
     z_pad, pad_bounds = util.pad_signal(z_test, L=pad_len)
     if spectrum_thresh is None:
-        fft_dict_test = util.extract_low_pass_components(z_pad, dt, max_freq=max_freq_fft)
+        fft_dict_test = util.extract_low_pass_components(
+            z_pad, dt, max_freq=max_freq_fft)
     else:
-        fft_dict_test = util.extract_low_pass_components_cdf_thresh(z_pad, dt, cdf_thresh=spectrum_thresh)
-    fft_dict_test['truth'] = fft_dict_test['truth'][pad_bounds[0]:pad_bounds[1]]  # fft reconstruction w/o pad
+        fft_dict_test = util.extract_low_pass_components_cdf_thresh(
+            z_pad, dt, cdf_thresh=spectrum_thresh)
+    fft_dict_test['truth'] = fft_dict_test['truth'][pad_bounds[0]                                                    :pad_bounds[1]]  # fft reconstruction w/o pad
 
     # store everything important
     fft_dict_train['raw'] = z_train
@@ -193,18 +206,22 @@ def spread_max_precontext(selections, max_freq_fft=2.0, cluster_cdf_threshold=.9
     conn = util.connect('btc', db_root='../data')
 
     # get training data
-    train_price_df = util.fetch_price_space(conn=conn, selection=selections['train'])
+    train_price_df = util.fetch_price_space(
+        conn=conn, selection=selections['train'])
 
     # get test data
-    test_price_df = util.fetch_price_space(conn=conn, selection=selections['test'])
+    test_price_df = util.fetch_price_space(
+        conn=conn, selection=selections['test'])
 
     # read in measurement data
     z_train, z_test = ((train_price_df.Open.values - train_price_df.Open.values[0]) / train_price_df.Open.values[0],
                        (test_price_df.Open.values - test_price_df.Open.values[0]) / test_price_df.Open.values[0])
 
     # compute clusters on the training/test sets
-    cluster_train = compute_cluster_dict(z_train, max_freq_fft, cluster_cdf_threshold, dt)
-    cluster_test = compute_cluster_dict(z_test, max_freq_fft, cluster_cdf_threshold, dt)
+    cluster_train = compute_cluster_dict(
+        z_train, max_freq_fft, cluster_cdf_threshold, dt)
+    cluster_test = compute_cluster_dict(
+        z_test, max_freq_fft, cluster_cdf_threshold, dt)
 
     # assemble the precontext
     spread_pre_context = dict({'train': {'raw': z_train,
@@ -231,7 +248,8 @@ def spread_max_context(pre_ctx, filter_values, dt=None):
 
 
 def anova_precontext(selections, omegas, max_freq_fft=2.0, cluster_cdf_threshold=.9, dt=1/(24*60)):
-    pre_ctx = spread_max_precontext(selections, max_freq_fft, cluster_cdf_threshold, dt)
+    pre_ctx = spread_max_precontext(
+        selections, max_freq_fft, cluster_cdf_threshold, dt)
     for k in pre_ctx.keys():
         pre_ctx[k]['omegas'] = omegas
     return pre_ctx
@@ -249,8 +267,10 @@ def anova_context(pre_ctx, filter_dict):
 
     # convert the cluster dictionary to a label array
     label_arr = np.zeros_like(pre_ctx['raw'])
-    label_arr[np.concatenate(pre_ctx['cluster_dict']['cluster_min']['x_points'])] = -1
-    label_arr[np.concatenate(pre_ctx['cluster_dict']['cluster_max']['x_points'])] = 1
+    label_arr[np.concatenate(pre_ctx['cluster_dict']
+                             ['cluster_min']['x_points'])] = -1
+    label_arr[np.concatenate(pre_ctx['cluster_dict']
+                             ['cluster_max']['x_points'])] = 1
     anova_ctx.label_arr = label_arr
     return anova_ctx
 
@@ -276,7 +296,8 @@ def build_objective_precontext(run_config,
 
     # build the appropriate data class for the objective function
     if obj_name == 'pos_mse':
-        pre_ctx = pos_mse_precontext(selection, max_freq, spectrum_thresh=spectrum_thresh)
+        pre_ctx = pos_mse_precontext(
+            selection, max_freq, spectrum_thresh=spectrum_thresh)
     elif obj_name == 'vel_mse':
         pre_ctx = vel_mse_precontext(selection, max_freq)
     elif obj_name == 'spread_max':
@@ -289,7 +310,8 @@ def build_objective_precontext(run_config,
                                    max_freq_fft=max_freq,
                                    cluster_cdf_threshold=cluster_cdf)
     elif obj_name == 'discrim_mse':
-        pre_ctx = discrim_mse_precontext(selection, max_freq, tracker=run_config.tracker)
+        pre_ctx = discrim_mse_precontext(
+            selection, max_freq, tracker=run_config.tracker)
     else:
         pre_ctx = None
 
@@ -351,17 +373,21 @@ def train_filter_bank_adam_autograd(filter_bank,
 
         # Compute current losses
         filter_bank.reset_states()
-        filter_dict = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
-        obj_ctx = build_objective_context(pre_context_train, filter_dict, objective_name)
+        filter_dict = filter_bank.run(pre_context_train['raw'], verbose=False)
+        obj_ctx = build_objective_context(
+            pre_context_train, filter_dict, objective_name)
         train_loss = loss_fn(obj_ctx)
 
         filter_bank.reset_states()
-        filter_dict_test = run_filter_bank(filter_bank, pre_context_test['raw'], verbose=False)
-        obj_ctx_test = build_objective_context(pre_context_test, filter_dict_test, objective_name)
+        filter_dict_test = filter_bank.run(
+            pre_context_test['raw'], verbose=False)
+        obj_ctx_test = build_objective_context(
+            pre_context_test, filter_dict_test, objective_name)
         test_loss = loss_fn(obj_ctx_test)
 
         losses[epoch] = [train_loss, test_loss]
-        print(f"Epoch {epoch}/{n_epochs}, Loss: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
+        print(
+            f"Epoch {epoch}/{n_epochs}, Loss: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
         print(f'\tQ Scalars: {q_log}')
         print(f'\tR Scalars: {r_log}')
 
@@ -380,20 +406,24 @@ def train_filter_bank_adam_autograd(filter_bank,
             filter_bank.reset_states()
             q_linear[i] = 10**(orig_value + autograd_epsilon)
             filter_bank.filters[i].set_q(q_linear[i])
-            filter_dict_plus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
+            filter_dict_plus = filter_bank.run(
+                pre_context_train['raw'], verbose=False)
 
             # compute loss for positive perturbation
-            obj_ctx = build_objective_context(pre_context_train, filter_dict_plus, objective_name)
+            obj_ctx = build_objective_context(
+                pre_context_train, filter_dict_plus, objective_name)
             loss_plus = loss_fn(obj_ctx)
 
             # Perturb negatively
             filter_bank.reset_states()
             q_linear[i] = 10**(orig_value - autograd_epsilon)
             filter_bank.filters[i].set_q(q_linear[i])
-            filter_dict_minus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
+            filter_dict_minus = filter_bank.run(
+                pre_context_train['raw'], verbose=False)
 
             # compute loss for negative perturbation
-            obj_ctx = build_objective_context(pre_context_train, filter_dict_minus, objective_name)
+            obj_ctx = build_objective_context(
+                pre_context_train, filter_dict_minus, objective_name)
             loss_minus = loss_fn(obj_ctx)
 
             # Restore original parameter
@@ -410,20 +440,24 @@ def train_filter_bank_adam_autograd(filter_bank,
             filter_bank.reset_states()
             r_linear[i] = 10**(orig_r + autograd_epsilon)
             filter_bank.filters[i].set_r(r_linear[i])
-            filter_dict_plus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
+            filter_dict_plus = filter_bank.run(
+                pre_context_train['raw'], verbose=False)
 
             # compute loss for positive perturbation
-            obj_ctx = build_objective_context(pre_context_train, filter_dict_plus, objective_name)
+            obj_ctx = build_objective_context(
+                pre_context_train, filter_dict_plus, objective_name)
             loss_plus = loss_fn(obj_ctx)
 
             # Perturb log space negatively, convert to linear, compute loss
             filter_bank.reset_states()
             r_linear[i] = 10**(orig_r - autograd_epsilon)
             filter_bank.filters[i].set_r(r_linear[i])
-            filter_dict_minus = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
+            filter_dict_minus = filter_bank.run(
+                pre_context_train['raw'], verbose=False)
 
             # compute loss for negative perturbation
-            obj_ctx = build_objective_context(pre_context_train, filter_dict_minus, objective_name)
+            obj_ctx = build_objective_context(
+                pre_context_train, filter_dict_minus, objective_name)
             loss_minus = loss_fn(obj_ctx)
 
             # Restore original linear value of rho
@@ -457,16 +491,19 @@ def train_filter_bank_adam_autograd(filter_bank,
 
     # Final loss reporting
     filter_bank.reset_states()
-    filter_dict = run_filter_bank(filter_bank, pre_context_train['raw'], verbose=False)
-    obj_ctx = build_objective_context(pre_context_train, filter_dict, objective_name)
+    filter_dict = filter_bank.run(pre_context_train['raw'], verbose=False)
+    obj_ctx = build_objective_context(
+        pre_context_train, filter_dict, objective_name)
     train_loss = loss_fn(obj_ctx)
 
     filter_bank.reset_states()
-    filter_dict_test = run_filter_bank(filter_bank, pre_context_test['raw'], verbose=False)
-    obj_ctx_test = build_objective_context(pre_context_test, filter_dict_test, objective_name)
+    filter_dict_test = filter_bank.run(pre_context_test['raw'], verbose=False)
+    obj_ctx_test = build_objective_context(
+        pre_context_test, filter_dict_test, objective_name)
     test_loss = loss_fn(obj_ctx_test)
 
-    print(f"\n\nFinal Loss after {n_epochs} epochs: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
+    print(
+        f"\n\nFinal Loss after {n_epochs} epochs: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
     # Display the optimised noise parameters
     print(f'Fitted Q Exponents: {q_log}')
     print(f'Fitted R Exponents: {r_log}')
@@ -544,8 +581,8 @@ def kf_single_forward_iae(
     alpha_ema=0.05,       # EMA smoothing for NIS
     eta_R=0.02,           # adaptation rate for R scale
     eta_Q=0.005,          # adaptation rate for Q scale (usually slower)
-    R_bounds=(1e-3, 1e3), # bounds on scalar beta
-    Q_bounds=(1e-6, 1e6), # bounds on scalar alpha
+    R_bounds=(1e-3, 1e3),  # bounds on scalar beta
+    Q_bounds=(1e-6, 1e6),  # bounds on scalar alpha
     use_ema_for_update=True,
 ):
     """
@@ -771,7 +808,8 @@ def kf_single_backward(cache, grad_fn, target_signal):
     # Loss is applied to x_post[t] for all t
     # ------------------------------------------------------------------
     # loss_grad[t] = dL/dx_post[t]
-    loss_grad = grad_fn(cache['backprop_signal'], target_signal)  # (T, dim_x, 1)
+    loss_grad = grad_fn(cache['backprop_signal'],
+                        target_signal)  # (T, dim_x, 1)
 
     # set 0 for the velocity term since we don't care about it
     Gx_post[1:] += loss_grad.reshape(-1, 1, 1).repeat(2, axis=1)
@@ -798,17 +836,17 @@ def kf_single_backward(cache, grad_fn, target_signal):
         A = I - K @ H               # (dim_x, dim_x)
 
         # Backprop through matrix product
-        A_bar        = Gp_post[n] @ P_p.T
+        A_bar = Gp_post[n] @ P_p.T
         Gp_prior[n] += A.T @ Gp_post[n]
-        GK[n]       += -A_bar @ H.T
+        GK[n] += -A_bar @ H.T
 
         # ==============================================================
         # (7) Posterior state update:
         #     x_f = x_p + K z
         # ==============================================================
         Gx_prior[n] += Gx_post[n]
-        GK[n]       += Gx_post[n] * z
-        Gy[n]       += (K.T @ Gx_post[n])[0, 0]
+        GK[n] += Gx_post[n] * z
+        Gy[n] += (K.T @ Gx_post[n])[0, 0]
 
         # ==============================================================
         # (6) Kalman gain:
@@ -831,7 +869,7 @@ def kf_single_backward(cache, grad_fn, target_signal):
         #     S = H P_p H^T + R
         # ==============================================================
         Gp_prior[n] += GS[n] * (H.T @ H)
-        dR          += GS[n] * beta[t]
+        dR += GS[n] * beta[t]
 
         # ==============================================================
         # (3) Innovation:
@@ -844,7 +882,7 @@ def kf_single_backward(cache, grad_fn, target_signal):
         #     P_p = F P_prev F^T + Q
         # ==============================================================
         Gp_prev = F.T @ Gp_prior[n] @ F
-        dQ     += Gp_prior[n] * alpha[t]
+        dQ += Gp_prior[n] * alpha[t]
 
         # ==============================================================
         # (1) Prior state:
@@ -901,10 +939,12 @@ def kf_bank_backward(caches, grad_fn, comp_dict):
         # add this truth component to the target signal
         combined_target_signal += comp_dict[tk]
         combined_bank_output += caches[filter_idx]['x_post'][:, 0]
-        caches[filter_idx]['backprop_signal'] = combined_bank_output.reshape(-1, 1)
+        caches[filter_idx]['backprop_signal'] = combined_bank_output.reshape(
+            -1, 1)
 
         # compute gradient of *this* filter w/r to the aggregated target signal
-        dQ_i, dR_i = kf_single_backward(caches[filter_idx], grad_fn, combined_target_signal)
+        dQ_i, dR_i = kf_single_backward(
+            caches[filter_idx], grad_fn, combined_target_signal)
         # store
         dQ_list[filter_idx] = dQ_i
         dR_list[filter_idx] = dR_i
@@ -942,7 +982,8 @@ def train_filter_bank_grad(filter_bank,
     pre_context_test = data['test']
 
     # establish per-epoch plotting of filter
-    plt.scatter(np.arange(len(pre_context_train['raw'])), pre_context_train['raw'], alpha=.5, color='k', s=5)
+    plt.scatter(np.arange(len(
+        pre_context_train['raw'])), pre_context_train['raw'], alpha=.5, color='k', s=5)
     plt.plot(pre_context_train['truth'], label=f'truth')
     cmap = plt.cm.copper
     colors = [cmap(i) for i in np.linspace(0, 1, n_epochs)]
@@ -957,24 +998,28 @@ def train_filter_bank_grad(filter_bank,
         # Compute train gradient
         filter_bank.reset_states()
         # print(f'\tForward Prop for {len(filter_bank)} filters...')
-        bank_cache = kf_bank_forward(filter_bank, pre_context_train['raw'], adapt=adapt)
+        bank_cache = kf_bank_forward(
+            filter_bank, pre_context_train['raw'], adapt=adapt)
         # filter_sum = np.zeros_like(pre_context_train['raw'])
         # for i in range(len(bank_cache)):
         #     filter_sum += bank_cache[i]['x_post'][:, 0]
         # plt.plot(filter_sum, label=f'Epoch {epoch}', color=colors[epoch-1], alpha=.5)
 
         # print(f'\tBackward Prop for {len(filter_bank)} filters...')
-        dQ, dR = kf_bank_backward(bank_cache, grad_fn, pre_context_train['comp_dict'])
+        dQ, dR = kf_bank_backward(
+            bank_cache, grad_fn, pre_context_train['comp_dict'])
 
         # update log parameters with gradient
         grad_r = dR * filter_bank.rho
         grad_q = np.zeros(len(filter_bank))
         for i, kf in enumerate(filter_bank.filters):
-            grad_q[i] = 2.0 * (filter_bank.sigma_xi[i] ** 2) * np.sum(dQ[i] * filter_bank.dt * kf.Q)
+            grad_q[i] = 2.0 * (filter_bank.sigma_xi[i] ** 2) * \
+                np.sum(dQ[i] * filter_bank.dt * kf.Q)
 
         # bank_cache['x'] = bank_cache['x_post']
         # obj_ctx = build_objective_context(pre_context_train, bank_cache, objective_name)
-        train_loss = opt_util.discrim_smooth_mse(cache=bank_cache, comp_dict=pre_context_train['comp_dict'])
+        train_loss = opt_util.discrim_smooth_mse(
+            cache=bank_cache, comp_dict=pre_context_train['comp_dict'])
         # train_loss = opt_util.smooth_mse(pre_context_train['truth'], filter_sum)
 
         # compute test gradient
@@ -1012,7 +1057,8 @@ def train_filter_bank_grad(filter_bank,
         filter_bank.reset_states()
 
     # plot the final filter
-    bank_cache = kf_bank_forward(filter_bank, pre_context_train['raw'], adapt=adapt)
+    bank_cache = kf_bank_forward(
+        filter_bank, pre_context_train['raw'], adapt=adapt)
     filter_sum = np.zeros_like(pre_context_train['raw'])
     for i in range(len(bank_cache)):
         filter_sum += bank_cache[i]['x_post'][:, 0]
@@ -1022,7 +1068,8 @@ def train_filter_bank_grad(filter_bank,
     plt.figure()
     plt.plot(np.arange(1, n_epochs+1), losses)
 
-    print(f"\n\nFinal Loss after {n_epochs} epochs: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
+    print(
+        f"\n\nFinal Loss after {n_epochs} epochs: {train_loss:.6f} | Validation Loss: {test_loss:.6f}")
     # Display the optimised noise parameters
     print(f'Fitted Q Exponents: {q_log}')
     print(f'Fitted R Exponents: {r_log}')
@@ -1045,8 +1092,10 @@ def plot_filter_bank(meas, bank_dict, dt, objective_function, truth_pos=None):
     # plot spread
     spread = np.tanh(meas - bank_x[:, 0])
     positive_idx, negative_idx = spread > 0, spread < 0
-    axs[0, 0].scatter(t_plot[positive_idx], spread[positive_idx], s=5, color='green')
-    axs[0, 0].scatter(t_plot[negative_idx], spread[negative_idx], s=5, color='red')
+    axs[0, 0].scatter(t_plot[positive_idx],
+                      spread[positive_idx], s=5, color='green')
+    axs[0, 0].scatter(t_plot[negative_idx],
+                      spread[negative_idx], s=5, color='red')
     axs[0, 0].set_title(f'Tanh Spread')
 
     # axs[0, 0].scatter(t, meas, color='red', s=5)
@@ -1057,7 +1106,8 @@ def plot_filter_bank(meas, bank_dict, dt, objective_function, truth_pos=None):
     axs[1, 0].plot(t_plot, bank_x[:, 1], color='k', label='filter estimate')
     axs[1, 0].set_title(f'Velocity Estimation')
     if truth_pos is not None:
-        axs[1, 0].plot(t_plot, np.gradient(truth_pos)/dt, color='orange', alpha=.5, label='truth extraction')
+        axs[1, 0].plot(t_plot, np.gradient(truth_pos)/dt,
+                       color='orange', alpha=.5, label='truth extraction')
     axs[1, 0].legend()
 
     # plot amplitude
@@ -1078,51 +1128,72 @@ def stationary_hex_plot(raws, filter_dicts, label_arrs, dt):
     raw_train, raw_test = raws[0], raws[1]
     filter_dict_train, filter_dict_test = filter_dicts[0], filter_dicts[1]
     label_arr_train, label_arr_test = label_arrs[0], label_arrs[1]
-    t_train, t_test = np.arange(len(filter_dict_train['x']))*dt, np.arange(len(filter_dict_test['x']))*dt
-    min_idx_train, max_idx_train = (label_arr_train == -1, label_arr_train == 1)
+    t_train, t_test = np.arange(
+        len(filter_dict_train['x']))*dt, np.arange(len(filter_dict_test['x']))*dt
+    min_idx_train, max_idx_train = (
+        label_arr_train == -1, label_arr_train == 1)
     min_idx_test, max_idx_test = (label_arr_test == -1, label_arr_test == 1)
 
     fig, ax = plt.subplots(2, 3, figsize=(10, 8))
 
     # plot positions
     ax[0, 0].plot(t_train, raw_train)
-    ax[0, 0].plot(t_train, filter_dict_train['x'][:, 0], color='orange', alpha=.5)
-    ax[0, 0].scatter(t_train[min_idx_train], raw_train[min_idx_train], color='green')
-    ax[0, 0].scatter(t_train[max_idx_train], raw_train[max_idx_train], color='red')
+    ax[0, 0].plot(t_train, filter_dict_train['x']
+                  [:, 0], color='orange', alpha=.5)
+    ax[0, 0].scatter(t_train[min_idx_train],
+                     raw_train[min_idx_train], color='green')
+    ax[0, 0].scatter(t_train[max_idx_train],
+                     raw_train[max_idx_train], color='red')
     ax[0, 0].set_title('Raw Measurement [Train]')
 
     ax[1, 0].plot(t_test, raw_test)
-    ax[1, 0].plot(t_test, filter_dict_test['x'][:, 0], color='orange', alpha=.5)
-    ax[1, 0].scatter(t_test[min_idx_test], raw_test[min_idx_test], color='green')
+    ax[1, 0].plot(t_test, filter_dict_test['x']
+                  [:, 0], color='orange', alpha=.5)
+    ax[1, 0].scatter(t_test[min_idx_test],
+                     raw_test[min_idx_test], color='green')
     ax[1, 0].scatter(t_test[max_idx_test], raw_test[max_idx_test], color='red')
     ax[1, 0].set_title('Raw Measurement [Test]')
 
     # plot empirical velocity
-    emp_vel_train = np.diff(np.concatenate(([0], filter_dict_train['x'][:, 0]))) / dt
-    emp_vel_test = np.diff(np.concatenate(([0], filter_dict_test['x'][:, 0]))) / dt
+    emp_vel_train = np.diff(np.concatenate(
+        ([0], filter_dict_train['x'][:, 0]))) / dt
+    emp_vel_test = np.diff(np.concatenate(
+        ([0], filter_dict_test['x'][:, 0]))) / dt
     ax[0, 1].plot(t_train, emp_vel_train)
-    ax[0, 1].plot(t_train, filter_dict_train['x'][:, 1], color='orange', alpha=.5)
-    ax[0, 1].scatter(t_train[min_idx_train], emp_vel_train[min_idx_train], color='green')
-    ax[0, 1].scatter(t_train[max_idx_train], emp_vel_train[max_idx_train], color='red')
+    ax[0, 1].plot(t_train, filter_dict_train['x']
+                  [:, 1], color='orange', alpha=.5)
+    ax[0, 1].scatter(t_train[min_idx_train],
+                     emp_vel_train[min_idx_train], color='green')
+    ax[0, 1].scatter(t_train[max_idx_train],
+                     emp_vel_train[max_idx_train], color='red')
     ax[0, 1].set_title('Empirical Velocity [Train]')
 
     ax[1, 1].plot(t_test, emp_vel_test)
-    ax[1, 1].plot(t_test, filter_dict_test['x'][:, 1], color='orange', alpha=.5)
-    ax[1, 1].scatter(t_test[min_idx_test], emp_vel_test[min_idx_test], color='green')
-    ax[1, 1].scatter(t_test[max_idx_test], emp_vel_test[max_idx_test], color='red')
+    ax[1, 1].plot(t_test, filter_dict_test['x']
+                  [:, 1], color='orange', alpha=.5)
+    ax[1, 1].scatter(t_test[min_idx_test],
+                     emp_vel_test[min_idx_test], color='green')
+    ax[1, 1].scatter(t_test[max_idx_test],
+                     emp_vel_test[max_idx_test], color='red')
     ax[1, 1].set_title('Empirical Velocity [Test]')
 
     # plot empirical acceleration
-    emp_acc_train = np.diff(np.concatenate(([0], filter_dict_train['x'][:, 1]))) / dt
-    emp_acc_test = np.diff(np.concatenate(([0], filter_dict_test['x'][:, 1]))) / dt
+    emp_acc_train = np.diff(np.concatenate(
+        ([0], filter_dict_train['x'][:, 1]))) / dt
+    emp_acc_test = np.diff(np.concatenate(
+        ([0], filter_dict_test['x'][:, 1]))) / dt
     ax[0, 2].plot(t_train, emp_acc_train)
-    ax[0, 2].scatter(t_train[min_idx_train], emp_acc_train[min_idx_train], color='green')
-    ax[0, 2].scatter(t_train[max_idx_train], emp_acc_train[max_idx_train], color='red')
+    ax[0, 2].scatter(t_train[min_idx_train],
+                     emp_acc_train[min_idx_train], color='green')
+    ax[0, 2].scatter(t_train[max_idx_train],
+                     emp_acc_train[max_idx_train], color='red')
     ax[0, 2].set_title('Empirical Acceleration [Train]')
 
     ax[1, 2].plot(t_test, emp_acc_test)
-    ax[1, 2].scatter(t_test[min_idx_test], emp_acc_test[min_idx_test], color='green')
-    ax[1, 2].scatter(t_test[max_idx_test], emp_acc_test[max_idx_test], color='red')
+    ax[1, 2].scatter(t_test[min_idx_test],
+                     emp_acc_test[min_idx_test], color='green')
+    ax[1, 2].scatter(t_test[max_idx_test],
+                     emp_acc_test[max_idx_test], color='red')
     ax[1, 2].set_title('Empirical Acceleration [Test]')
 
 
@@ -1285,8 +1356,10 @@ if __name__ == "__main__":
     import pickle
 
     # set initial parameters
-    train_selection = [datetime.datetime(2025, 7, 31).timestamp(), datetime.datetime(2025, 8, 10).timestamp() - 1]
-    test_selection = [datetime.datetime(2025, 8, 11).timestamp(), datetime.datetime(2025, 8, 12).timestamp() - 1]
+    train_selection = [datetime.datetime(2025, 7, 31).timestamp(
+    ), datetime.datetime(2025, 8, 10).timestamp() - 1]
+    test_selection = [datetime.datetime(2025, 8, 11).timestamp(
+    ), datetime.datetime(2025, 8, 12).timestamp() - 1]
     objective = 'discrim_mse'
     subdir_str = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     # save_root = f'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2025\\4_Fall\\CS-591\\training_sessions\\{objective}'
@@ -1295,7 +1368,8 @@ if __name__ == "__main__":
     os.makedirs(save_root)
 
     # construct the run config
-    tracker_path = None  # 'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2026\\Capstone 2\\narrowband_tracking_bank.pkl'
+    # 'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2026\\Capstone 2\\narrowband_tracking_bank.pkl'
+    tracker_path = None
     run_cfg = RunConfig(train_times=train_selection,
                         test_times=test_selection,
                         objective_str=objective,
@@ -1329,10 +1403,12 @@ if __name__ == "__main__":
                                                  alpha=run_cfg.grad_desc_config['alpha'])
 
     with open(f'{save_root}\\{objective}_shot_notes.txt', 'a') as f:
-        f.write(f'\n\nFinal Q (log10): {np.log10(trained_filter_bank.sigma_xi)}\n')
+        f.write(
+            f'\n\nFinal Q (log10): {np.log10(trained_filter_bank.sigma_xi)}\n')
         f.write(f'Final R (log10): {np.log10(trained_filter_bank.rho)}')
         f.close()
-    pickle.dump(trained_filter_bank, open(f'{save_root}\\filter_bank.pkl', 'wb'))
+    pickle.dump(trained_filter_bank, open(
+        f'{save_root}\\filter_bank.pkl', 'wb'))
     pickle.dump(run_cfg, open(f'{save_root}\\run_config.pkl', 'wb'))
 
     # run and plot the trained filter
@@ -1342,7 +1418,7 @@ if __name__ == "__main__":
         trained_filter_bank.reset_states()
 
         # run
-        trained_filter_dict = run_filter_bank(trained_filter_bank, pre_context[d]['raw'])
+        trained_filter_dict = trained_filter_bank.run(pre_context[d]['raw'])
         fig = plot_filter_bank(pre_context[d]['raw'],
                                trained_filter_dict,
                                pre_context[d]['dt'],
@@ -1361,5 +1437,3 @@ if __name__ == "__main__":
         plt.savefig(f'{save_root}\\meas_filter_plot_{d}.png')
 
     # plt.show(block=True)
-
-

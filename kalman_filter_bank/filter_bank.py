@@ -87,6 +87,54 @@ class FilterBank:
         for f in self.filters:
             f.x = np.zeros_like(f.x)
 
+    def run(self, measurements, verbose=True):
+        measurements = np.asarray(measurements, dtype=float).reshape(-1)
+        n_steps = measurements.shape[0]
+
+        if len(self.filters) == 0:
+            raise ValueError(
+                "Filter bank has no filters. Did you call build_filter_bank()?")
+
+        dim_x = self.filters[0].x.shape[0]
+        n_models = len(self.filters)
+
+        all_states = np.zeros((n_steps, dim_x))
+        all_covs = np.zeros((n_steps, dim_x, dim_x))
+        all_weights = np.zeros((n_steps, n_models))
+        all_amp = np.zeros((n_steps, n_models))
+        all_phi = np.zeros((n_steps, n_models))
+
+        iterator = range(n_steps)
+        if verbose:
+            print(f"Running the Filter Bank for {n_steps} steps")
+            iterator = tqdm(iterator)
+
+        for k in iterator:
+            z = measurements[k]
+            step_out = self.step(z)
+
+            # Support both tuple-returning banks (tracking) and dict-returning banks (DiscriminationFilterBank)
+            if isinstance(step_out, dict):
+                # Expect DiscriminationFilterBank-style output with "combined"
+                combined = step_out.get("combined", None)
+                if combined is None:
+                    raise ValueError(
+                        "step() returned a dict but did not include a 'combined' key.")
+                all_states[k] = np.array(combined["x"])
+                all_covs[k] = np.array(combined["P"])
+
+            else:
+                all_states[k] = np.array(step_out[0])
+                all_covs[k] = np.array(step_out[1])
+                if len(step_out) > 2:
+                    all_weights[k] = np.array(step_out[2])
+
+            all_amp[k] = self.amplitudes()
+            all_phi[k] = self.phases()
+
+        return {"x": all_states, "p": all_covs, "w": all_weights,
+                "amp": all_amp, "phi": all_phi, "omega": self.omegas}
+
     def __len__(self):
         return len(self.filters)
 
@@ -333,8 +381,10 @@ class DiscriminationFilterBank(SinusoidalFilterBank):
 
         if self._use_iae:
             # store the base matrices of the filter bank
-            self.R0_arr = np.zeros(np.concatenate([[len(self.filters)], self.filters[0].R.shape]))
-            self.Q0_arr = np.zeros(np.concatenate([[len(self.filters)], self.filters[0].Q.shape]))
+            self.R0_arr = np.zeros(np.concatenate(
+                [[len(self.filters)], self.filters[0].R.shape]))
+            self.Q0_arr = np.zeros(np.concatenate(
+                [[len(self.filters)], self.filters[0].Q.shape]))
             for i, kf in enumerate(self.filters):
                 self.R0_arr[i] = kf.R.copy()
                 self.Q0_arr[i] = kf.Q.copy()
@@ -352,8 +402,10 @@ class DiscriminationFilterBank(SinusoidalFilterBank):
         for i, kf in enumerate(self.filters):
             if self._use_iae:
                 # ---- Apply current scalings BEFORE predict/update ----
-                beta = float(np.clip(np.exp(self.log_beta[i]), self.R_bounds[0], self.R_bounds[1]))
-                alpha = float(np.clip(np.exp(self.log_alpha[i]), self.Q_bounds[0], self.Q_bounds[1]))
+                beta = float(
+                    np.clip(np.exp(self.log_beta[i]), self.R_bounds[0], self.R_bounds[1]))
+                alpha = float(
+                    np.clip(np.exp(self.log_alpha[i]), self.Q_bounds[0], self.Q_bounds[1]))
 
                 if self.adapt in ("R", "both"):
                     kf.R = beta * self.R0_arr[i]
@@ -394,12 +446,14 @@ class DiscriminationFilterBank(SinusoidalFilterBank):
                     nis = float((y[0] * y[0]) / (S[0, 0] + 1e-12))
                 else:
                     # Solve S^{-1} y without explicitly inverting
-                    nis = float(y.T @ np.linalg.solve(S + 1e-12*np.eye(self.dim_z), y))
+                    nis = float(y.T @ np.linalg.solve(S +
+                                1e-12*np.eye(self.dim_z), y))
 
                 cache[kf.omega]["nis"] = nis
 
                 # ---- Smooth NIS (optional, recommended) ----
-                nis_ema = (1.0 - self.alpha_ema) * nis_ema + self.alpha_ema * nis
+                nis_ema = (1.0 - self.alpha_ema) * \
+                    nis_ema + self.alpha_ema * nis
                 cache[kf.omega]["nis_ema"] = nis_ema
 
                 # ---- Adaptation signal ----
@@ -415,66 +469,6 @@ class DiscriminationFilterBank(SinusoidalFilterBank):
         cache['combined']['x'] = x_combined
         cache['combined']['P'] = P_combined
         return cache
-
-
-class SinusoidalCMMEAFilterBank(SinusoidalFilterBank):
-    def __init__(self, dim_x=2, dim_z=1, omegas=None, dt=0.0, sigma_xi=0.1, rho=1e-2):
-        # build the parent sinusoidal filter bank
-        super().__init__(dim_x=dim_x,
-                         dim_z=dim_z,
-                         omegas=omegas,
-                         dt=dt,
-                         sigma_xi=sigma_xi,
-                         rho=rho)
-        self.weights = np.ones(self.N)  # Uniform initial weights
-
-    def compute_likelihood(self, kf, z):
-        """Compute likelihood p(y_k | θ_i, y_1:k-1)"""
-        y = z.reshape(-1, 1)
-        H = kf.H
-        x_pred = kf.x_prior
-        P_pred = kf.P_prior
-        R = kf.R
-
-        y_resid = y - H @ x_pred
-        S = H @ P_pred @ H.T + R
-        S_inv = np.linalg.inv(S)
-        exponent = -0.5 * (y_resid.T @ S_inv @ y_resid)
-        denom = np.sqrt((2 * np.pi) ** self.dim_z * np.linalg.det(S))
-        likelihood = np.exp(exponent) / denom
-        return likelihood.item()
-
-    def step(self, z):
-        """Run one filter step for all filters and fuse using CMMEA logic"""
-        likelihoods = np.zeros(self.N)
-        x_preds = []
-        P_preds = []
-
-        for i, kf in enumerate(self.filters):
-            kf.predict()
-            kf.update(z)
-            x_preds.append(kf.x.copy())
-            P_preds.append(kf.P.copy())
-            likelihoods[i] = self.compute_likelihood(kf, z)
-
-        # print(likelihoods)
-
-        # Update weights using Bayes rule
-        prior_weights = self.weights.copy()
-        numerators = prior_weights * likelihoods
-        self.weights = numerators / np.sum(numerators)
-
-        # Fuse state estimates
-        x_fused = np.sum(
-            [w * x for w, x in zip(self.weights, x_preds)], axis=0)
-
-        # Fuse covariances
-        P_fused = sum([
-            w * (P + (x - x_fused) @ (x - x_fused).T)
-            for w, x, P in zip(self.weights, x_preds, P_preds)
-        ])
-
-        return x_fused, P_fused, self.weights.copy()
 
 
 def run_filter_bank(fbank, measurements, verbose=True):
@@ -521,7 +515,8 @@ def create_sig_dict(price_df, random_date=True, max_freq=10, dt=1/1440):
     # pad signal, compute omegas
     padded_signal, true_bounds = pad_signal(rate_signal)
     # dt = 1 / len(rate_signal)
-    sig_dict = extract_low_pass_components(padded_signal, dt, max_freq=max_freq)
+    sig_dict = extract_low_pass_components(
+        padded_signal, dt, max_freq=max_freq)
     sig_dict['truth_pad'] = sig_dict['truth']
     sig_dict['truth'] = sig_dict['truth_pad'][true_bounds[0]:true_bounds[1]]
     sig_dict['raw'] = rate_signal
@@ -624,7 +619,8 @@ if __name__ == '__main__':
     # read in trained filter bank
     bank_file_root = 'C:\\Users\\cwass\\OneDrive\\Desktop\\Drexel\\2026\\Capstone 2\\training_sessions\\discrim_mse'
     date_str = '2026-01-25_15-22-47'
-    trained_filter_bank = pickle.load(open(f'{bank_file_root}\\{date_str}\\filter_bank.pkl', 'rb'))
+    trained_filter_bank = pickle.load(
+        open(f'{bank_file_root}\\{date_str}\\filter_bank.pkl', 'rb'))
 
     # adapt parameters into the Discrimination Filter Bank
     dfb = DiscriminationFilterBank(dt=trained_filter_bank.dt,
